@@ -31,7 +31,7 @@
 #define DECREASE_ACTIVE_COUNT(loop, handle)                             \
   do {                                                                  \
     if (--(handle)->activecnt == 0 &&                                   \
-        !((handle)->flags & UV_HANDLE_CLOSING)) {                       \
+        !((handle)->flags & UV__HANDLE_CLOSING)) {                      \
       uv__handle_stop((handle));                                        \
     }                                                                   \
     assert((handle)->activecnt >= 0);                                   \
@@ -52,30 +52,36 @@
     assert(handle->reqs_pending > 0);                                   \
     handle->reqs_pending--;                                             \
                                                                         \
-    if (handle->flags & UV_HANDLE_CLOSING &&                            \
+    if (handle->flags & UV__HANDLE_CLOSING &&                           \
         handle->reqs_pending == 0) {                                    \
       uv_want_endgame(loop, (uv_handle_t*)handle);                      \
     }                                                                   \
   } while (0)
 
 
-#define uv__handle_close(handle)                                        \
+#define uv__handle_closing(handle)                                      \
   do {                                                                  \
-    ngx_queue_remove(&(handle)->handle_queue);                          \
-    (handle)->flags |= UV_HANDLE_CLOSED;                                \
-    if ((handle)->close_cb) {                                           \
-      (handle)->close_cb((uv_handle_t*)(handle));                       \
-    }                                                                   \
+    assert(!((handle)->flags & UV__HANDLE_CLOSING));                    \
+                                                                        \
+    if (!(((handle)->flags & UV__HANDLE_ACTIVE) &&                      \
+          ((handle)->flags & UV__HANDLE_REF)))                          \
+      uv__active_handle_add((uv_handle_t*) (handle));                   \
+                                                                        \
+    (handle)->flags |= UV__HANDLE_CLOSING;                              \
+    (handle)->flags &= ~UV__HANDLE_ACTIVE;                              \
   } while (0)
 
 
-INLINE static void uv_handle_init(uv_loop_t* loop, uv_handle_t* handle) {
-  handle->loop = loop;
-  handle->flags = UV__HANDLE_REF;
-  ngx_queue_insert_tail(&loop->handle_queue, &handle->handle_queue);
-
-  loop->counters.handle_init++;
-}
+#define uv__handle_close(handle)                                        \
+  do {                                                                  \
+    ngx_queue_remove(&(handle)->handle_queue);                          \
+    uv__active_handle_rm((uv_handle_t*) (handle));                      \
+                                                                        \
+    (handle)->flags |= UV_HANDLE_CLOSED;                                \
+                                                                        \
+    if ((handle)->close_cb)                                             \
+      (handle)->close_cb((uv_handle_t*) (handle));                      \
+  } while (0)
 
 
 INLINE static void uv_want_endgame(uv_loop_t* loop, uv_handle_t* handle) {
@@ -132,12 +138,20 @@ INLINE static void uv_process_endgames(uv_loop_t* loop) {
         uv_async_endgame(loop, (uv_async_t*) handle);
         break;
 
+      case UV_SIGNAL:
+        uv_signal_endgame(loop, (uv_signal_t*) handle);
+        break;
+
       case UV_PROCESS:
         uv_process_endgame(loop, (uv_process_t*) handle);
         break;
 
       case UV_FS_EVENT:
         uv_fs_event_endgame(loop, (uv_fs_event_t*) handle);
+        break;
+
+      case UV_FS_POLL:
+        uv__fs_poll_endgame(loop, (uv_fs_poll_t*) handle);
         break;
 
       default:

@@ -230,6 +230,13 @@ inline void CheckNonEqualsHelper(const char* file,
 #define CHECK_LE(a, b) CHECK((a) <= (b))
 
 
+#if defined(__clang__) || defined(__GNUC__)
+# define V8_UNUSED __attribute__((unused))                                                                                                                                                                         
+#else                                                                                                                                                                                                              
+# define V8_UNUSED                                                                                                                                                                                                 
+#endif
+
+
 // This is inspired by the static assertion facility in boost.  This
 // is pretty magical.  If it causes you trouble on a platform you may
 // find a fix in the boost code.
@@ -248,7 +255,7 @@ template <int> class StaticAssertionHelper { };
 #define STATIC_CHECK(test)                                                    \
   typedef                                                                     \
     StaticAssertionHelper<sizeof(StaticAssertion<static_cast<bool>((test))>)> \
-    SEMI_STATIC_JOIN(__StaticAssertTypedef__, __LINE__)
+    SEMI_STATIC_JOIN(__StaticAssertTypedef__, __LINE__) V8_UNUSED
 
 
 extern bool FLAG_enable_slow_asserts;
@@ -283,5 +290,13 @@ extern bool FLAG_enable_slow_asserts;
 #define STATIC_ASSERT(test)  STATIC_CHECK(test)
 
 #define ASSERT_NOT_NULL(p)  ASSERT_NE(NULL, p)
+
+// "Extra checks" are lightweight checks that are enabled in some release
+// builds.
+#ifdef ENABLE_EXTRA_CHECKS
+#define EXTRA_CHECK(condition) CHECK(condition)
+#else
+#define EXTRA_CHECK(condition) ((void) 0)
+#endif
 
 #endif  // V8_CHECKS_H_

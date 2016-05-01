@@ -27,6 +27,22 @@ var assert = require('assert');
 var os = require('os');
 
 
+process.env.TMPDIR = '/tmpdir';
+process.env.TMP = '/tmp';
+process.env.TEMP = '/temp';
+var t = ( process.platform === 'win32' ? 'c:\\windows\\temp' : '/tmp' );
+assert.equal(os.tmpdir(), '/tmpdir');
+process.env.TMPDIR = '';
+assert.equal(os.tmpdir(), '/tmp');
+process.env.TMP = '';
+assert.equal(os.tmpdir(), '/temp');
+process.env.TEMP = '';
+assert.equal(os.tmpdir(), t);
+
+var endianness = os.endianness();
+console.log('endianness = %s', endianness);
+assert.ok(/[BL]E/.test(endianness));
+
 var hostname = os.hostname();
 console.log('hostname = %s', hostname);
 assert.ok(hostname.length > 0);

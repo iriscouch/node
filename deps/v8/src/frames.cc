@@ -469,6 +469,20 @@ StackFrame::Type StackFrame::GetCallerState(State* state) const {
 }
 
 
+Address StackFrame::UnpaddedFP() const {
+#if defined(V8_TARGET_ARCH_IA32)
+  if (!is_optimized()) return fp();
+  int32_t alignment_state = Memory::int32_at(
+    fp() + JavaScriptFrameConstants::kDynamicAlignmentStateOffset);
+
+  return (alignment_state == kAlignmentPaddingPushed) ?
+    (fp() + kPointerSize) : fp();
+#else
+  return fp();
+#endif
+}
+
+
 Code* EntryFrame::unchecked_code() const {
   return HEAP->raw_unchecked_js_entry_code();
 }
@@ -678,6 +692,11 @@ void OptimizedFrame::Iterate(ObjectVisitor* v) const {
 }
 
 
+void JavaScriptFrame::SetParameterValue(int index, Object* value) const {
+  Memory::Object_at(GetParameterSlot(index)) = value;
+}
+
+
 bool JavaScriptFrame::IsConstructor() const {
   Address fp = caller_fp();
   if (has_adapted_arguments()) {
@@ -775,7 +794,7 @@ void JavaScriptFrame::PrintTop(FILE* file,
                                          ROBUST_STRING_TRAVERSAL);
               PrintF(file, " at %s:%d", *c_script_name, line);
             } else {
-              PrintF(file, "at <unknown>:%d", line);
+              PrintF(file, " at <unknown>:%d", line);
             }
           } else {
             PrintF(file, " at <unknown>:<unknown>");
@@ -818,12 +837,23 @@ void FrameSummary::Print() {
 }
 
 
+JSFunction* OptimizedFrame::LiteralAt(FixedArray* literal_array,
+                                      int literal_id) {
+  if (literal_id == Translation::kSelfLiteralId) {
+    return JSFunction::cast(function());
+  }
+
+  return JSFunction::cast(literal_array->get(literal_id));
+}
+
+
 void OptimizedFrame::Summarize(List<FrameSummary>* frames) {
   ASSERT(frames->length() == 0);
   ASSERT(is_optimized());
 
   int deopt_index = Safepoint::kNoDeoptimizationIndex;
   DeoptimizationInputData* data = GetDeoptimizationData(&deopt_index);
+  FixedArray* literal_array = data->LiteralArray();
 
   // BUG(3243555): Since we don't have a lazy-deopt registered at
   // throw-statements, we can't use the translation at the call-site of
@@ -850,11 +880,9 @@ void OptimizedFrame::Summarize(List<FrameSummary>* frames) {
     opcode = static_cast<Translation::Opcode>(it.Next());
     if (opcode == Translation::JS_FRAME) {
       i--;
-      int ast_id = it.Next();
-      int function_id = it.Next();
+      BailoutId ast_id = BailoutId(it.Next());
+      JSFunction* function = LiteralAt(literal_array, it.Next());
       it.Next();  // Skip height.
-      JSFunction* function =
-          JSFunction::cast(data->LiteralArray()->get(function_id));
 
       // The translation commands are ordered and the receiver is always
       // at the first position. Since we are always at a call when we need
@@ -961,6 +989,7 @@ void OptimizedFrame::GetFunctions(List<JSFunction*>* functions) {
 
   int deopt_index = Safepoint::kNoDeoptimizationIndex;
   DeoptimizationInputData* data = GetDeoptimizationData(&deopt_index);
+  FixedArray* literal_array = data->LiteralArray();
 
   TranslationIterator it(data->TranslationByteArray(),
                          data->TranslationIndex(deopt_index)->value());
@@ -976,10 +1005,8 @@ void OptimizedFrame::GetFunctions(List<JSFunction*>* functions) {
     if (opcode == Translation::JS_FRAME) {
       jsframe_count--;
       it.Next();  // Skip ast id.
-      int function_id = it.Next();
+      JSFunction* function = LiteralAt(literal_array, it.Next());
       it.Next();  // Skip height.
-      JSFunction* function =
-          JSFunction::cast(data->LiteralArray()->get(function_id));
       functions->Add(function);
     } else {
       // Skip over operands to advance to the next opcode.
@@ -1359,34 +1386,28 @@ InnerPointerToCodeCache::InnerPointerToCodeCacheEntry*
 // -------------------------------------------------------------------------
 
 int NumRegs(RegList reglist) {
-  int n = 0;
-  while (reglist != 0) {
-    n++;
-    reglist &= reglist - 1;  // clear one bit
-  }
-  return n;
+  return CompilerIntrinsics::CountSetBits(reglist);
 }
 
 
 struct JSCallerSavedCodeData {
-  JSCallerSavedCodeData() {
-    int i = 0;
-    for (int r = 0; r < kNumRegs; r++)
-      if ((kJSCallerSaved & (1 << r)) != 0)
-        reg_code[i++] = r;
-
-    ASSERT(i == kNumJSCallerSaved);
-  }
   int reg_code[kNumJSCallerSaved];
 };
 
+JSCallerSavedCodeData caller_saved_code_data;
 
-static LazyInstance<JSCallerSavedCodeData>::type caller_saved_code_data =
-    LAZY_INSTANCE_INITIALIZER;
+void SetUpJSCallerSavedCodeData() {
+  int i = 0;
+  for (int r = 0; r < kNumRegs; r++)
+    if ((kJSCallerSaved & (1 << r)) != 0)
+      caller_saved_code_data.reg_code[i++] = r;
+
+  ASSERT(i == kNumJSCallerSaved);
+}
 
 int JSCallerSavedCode(int n) {
   ASSERT(0 <= n && n < kNumJSCallerSaved);
-  return caller_saved_code_data.Get().reg_code[n];
+  return caller_saved_code_data.reg_code[n];
 }
 
 
@@ -1400,11 +1421,11 @@ class field##_Wrapper : public ZoneObject {                      \
 STACK_FRAME_TYPE_LIST(DEFINE_WRAPPER)
 #undef DEFINE_WRAPPER
 
-static StackFrame* AllocateFrameCopy(StackFrame* frame) {
+static StackFrame* AllocateFrameCopy(StackFrame* frame, Zone* zone) {
 #define FRAME_TYPE_CASE(type, field) \
   case StackFrame::type: { \
     field##_Wrapper* wrapper = \
-        new field##_Wrapper(*(reinterpret_cast<field*>(frame))); \
+        new(zone) field##_Wrapper(*(reinterpret_cast<field*>(frame))); \
     return &wrapper->frame_; \
   }
 
@@ -1416,11 +1437,11 @@ static StackFrame* AllocateFrameCopy(StackFrame* frame) {
   return NULL;
 }
 
-Vector<StackFrame*> CreateStackMap() {
-  ZoneList<StackFrame*> list(10);
+Vector<StackFrame*> CreateStackMap(Zone* zone) {
+  ZoneList<StackFrame*> list(10, zone);
   for (StackFrameIterator it; !it.done(); it.Advance()) {
-    StackFrame* frame = AllocateFrameCopy(it.frame());
-    list.Add(frame);
+    StackFrame* frame = AllocateFrameCopy(it.frame(), zone);
+    list.Add(frame, zone);
   }
   return list.ToVector();
 }

@@ -13,13 +13,16 @@
 
 module.exports = install
 
-install.usage = "npm install <tarball file>"
-              + "\nnpm install <tarball url>"
-              + "\nnpm install <folder>"
+install.usage = "npm install"
               + "\nnpm install <pkg>"
               + "\nnpm install <pkg>@<tag>"
               + "\nnpm install <pkg>@<version>"
               + "\nnpm install <pkg>@<version range>"
+              + "\nnpm install <folder>"
+              + "\nnpm install <tarball file>"
+              + "\nnpm install <tarball url>"
+              + "\nnpm install <git:// url>"
+              + "\nnpm install <github username>/<github project>"
               + "\n\nCan specify one or more: npm install ./foo.tgz bar@stable /some/folder"
               + "\nIf no argument is supplied and ./npm-shrinkwrap.json is "
               + "\npresent, installs dependencies specified in the shrinkwrap."
@@ -30,8 +33,9 @@ install.completion = function (opts, cb) {
   // if it has a slash, then it's gotta be a folder
   // if it starts with https?://, then just give up, because it's a url
   // for now, not yet implemented.
-  var registry = require("./utils/npm-registry-client/index.js")
-  registry.get("/-/short", function (er, pkgs) {
+  var registry = npm.registry
+    , uri = url.resolve(npm.config.get("registry"), "-/short")
+  registry.get(uri, null, function (er, pkgs) {
     if (er) return cb()
     if (!opts.partialWord) return cb(null, pkgs)
 
@@ -44,7 +48,8 @@ install.completion = function (opts, cb) {
       return cb(null, pkgs)
     }
 
-    registry.get(pkgs[0], function (er, d) {
+    uri = url.resolve(npm.config.get("registry"), pkgs[0])
+    registry.get(uri, null, function (er, d) {
       if (er) return cb()
       return cb(null, Object.keys(d["dist-tags"] || {})
                 .concat(Object.keys(d.versions || {}))
@@ -57,37 +62,46 @@ install.completion = function (opts, cb) {
 
 var npm = require("./npm.js")
   , semver = require("semver")
-  , readJson = require("./utils/read-json.js")
-  , log = require("./utils/log.js")
+  , readJson = require("read-package-json")
+  , readInstalled = require("read-installed")
+  , log = require("npmlog")
   , path = require("path")
   , fs = require("graceful-fs")
   , cache = require("./cache.js")
   , asyncMap = require("slide").asyncMap
   , chain = require("slide").chain
-  , relativize = require("./utils/relativize.js")
-  , output
   , url = require("url")
   , mkdir = require("mkdirp")
   , lifecycle = require("./utils/lifecycle.js")
   , archy = require("archy")
+  , isGitUrl = require("./utils/is-git-url.js")
+  , npmInstallChecks = require("npm-install-checks")
+  , sortedObject = require("sorted-object")
 
 function install (args, cb_) {
+  var hasArguments = !!args.length
 
   function cb (er, installed) {
     if (er) return cb_(er)
 
-    output = output || require("./utils/output.js")
-
-    var tree = treeify(installed)
-      , pretty = prettify(tree, installed).trim()
-
-    if (pretty) output.write(pretty, afterWrite)
-    else afterWrite()
-
-    function afterWrite (er) {
+    findPeerInvalid(where, function (er, problem) {
       if (er) return cb_(er)
-      save(where, installed, tree, pretty, cb_)
-    }
+
+      if (problem) {
+        var peerInvalidError = new Error("The package " + problem.name +
+          " does not satisfy its siblings' peerDependencies requirements!")
+        peerInvalidError.code = "EPEERINVALID"
+        peerInvalidError.packageName = problem.name
+        peerInvalidError.peersDepending = problem.peersDepending
+        return cb(peerInvalidError)
+      }
+
+      var tree = treeify(installed || [])
+        , pretty = prettify(tree, installed).trim()
+
+      if (pretty) console.log(pretty)
+      save(where, installed, tree, pretty, hasArguments, cb_)
+    })
   }
 
   // the /path/to/node_modules/..
@@ -98,7 +112,7 @@ function install (args, cb_) {
     where = args
     args = [].concat(cb_) // pass in [] to do default dep-install
     cb_ = arguments[2]
-    log.verbose([where, args], "install(where, what)")
+    log.verbose("install", "where,what", [where, args])
   }
 
   if (!npm.config.get("global")) {
@@ -107,50 +121,110 @@ function install (args, cb_) {
     })
   }
 
-  mkdir(where, function (er, made) {
+  mkdir(where, function (er) {
     if (er) return cb(er)
     // install dependencies locally by default,
     // or install current folder globally
     if (!args.length) {
+      var opt = { dev: npm.config.get("dev") || !npm.config.get("production") }
+
       if (npm.config.get("global")) args = ["."]
-      else return readDependencies( null
-                                  , where
-                                  , { dev: !npm.config.get("production") }
-                                  , function (er, data) {
-        if (er) return log.er(cb, "Couldn't read dependencies.")(er)
+      else return readDependencies(null, where, opt, function (er, data) {
+        if (er) {
+          log.error("install", "Couldn't read dependencies")
+          return cb(er)
+        }
         var deps = Object.keys(data.dependencies || {})
-        log.verbose([where, deps], "where, deps")
+        log.verbose("install", "where, deps", [where, deps])
         var context = { family: {}
                       , ancestors: {}
                       , explicit: false
                       , parent: data
+                      , root: true
                       , wrap: null }
-        context.family[data.name] = context.ancestors[data.name] = data.version
+
+        if (data.name === path.basename(where) &&
+            path.basename(path.dirname(where)) === "node_modules") {
+          // Only include in ancestry if it can actually be required.
+          // Otherwise, it does not count.
+          context.family[data.name] =
+            context.ancestors[data.name] = data.version
+        }
+
         installManyTop(deps.map(function (dep) {
           var target = data.dependencies[dep]
-            , parsed = url.parse(target.replace(/^git\+/, "git"))
           target = dep + "@" + target
           return target
-        }), where, context, cb)
+        }), where, context, function(er, results) {
+          if (er) return cb(er, results)
+          lifecycle(data, "prepublish", where, function(er) {
+            return cb(er, results)
+          })
+        })
       })
     }
 
     // initial "family" is the name:version of the root, if it's got
     // a package.json file.
-    readJson(path.resolve(where, "package.json"), function (er, data) {
+    var jsonFile = path.resolve(where, "package.json")
+    readJson(jsonFile, log.warn, function (er, data) {
+      if (er
+          && er.code !== "ENOENT"
+          && er.code !== "ENOTDIR") return cb(er)
       if (er) data = null
       var context = { family: {}
                     , ancestors: {}
                     , explicit: true
                     , parent: data
+                    , root: true
                     , wrap: null }
-      if (data) {
+      if (data && data.name === path.basename(where) &&
+          path.basename(path.dirname(where)) === "node_modules") {
         context.family[data.name] = context.ancestors[data.name] = data.version
       }
       var fn = npm.config.get("global") ? installMany : installManyTop
       fn(args, where, context, cb)
     })
   })
+}
+
+function findPeerInvalid (where, cb) {
+  readInstalled(where, { log: log.warn, dev: true }, function (er, data) {
+    if (er) return cb(er)
+
+    cb(null, findPeerInvalid_(data.dependencies, []))
+  })
+}
+
+function findPeerInvalid_ (packageMap, fpiList) {
+  if (fpiList.indexOf(packageMap) !== -1)
+    return
+
+  fpiList.push(packageMap)
+
+  for (var packageName in packageMap) {
+    var pkg = packageMap[packageName]
+
+    if (pkg.peerInvalid) {
+      var peersDepending = {};
+      for (var peerName in packageMap) {
+        var peer = packageMap[peerName]
+        if (peer.peerDependencies && peer.peerDependencies[packageName]) {
+          peersDepending[peer.name + "@" + peer.version] =
+            peer.peerDependencies[packageName]
+        }
+      }
+      return { name: pkg.name, peersDepending: peersDepending }
+    }
+
+    if (pkg.dependencies) {
+      var invalid = findPeerInvalid_(pkg.dependencies, fpiList)
+      if (invalid)
+        return invalid
+    }
+  }
+
+  return null
 }
 
 // reads dependencies for the package at "where". There are several cases,
@@ -171,23 +245,40 @@ function readDependencies (context, where, opts, cb) {
   var wrap = context ? context.wrap : null
 
   readJson( path.resolve(where, "package.json")
-          , opts
+          , log.warn
           , function (er, data) {
+    if (er && er.code === "ENOENT") er.code = "ENOPACKAGEJSON"
     if (er)  return cb(er)
 
+    if (opts && opts.dev) {
+      if (!data.dependencies) data.dependencies = {}
+      Object.keys(data.devDependencies || {}).forEach(function (k) {
+        data.dependencies[k] = data.devDependencies[k]
+      })
+    }
+
+    if (!npm.config.get("optional") && data.optionalDependencies) {
+      Object.keys(data.optionalDependencies).forEach(function (d) {
+        delete data.dependencies[d]
+      })
+    }
+
+    // User has opted out of shrinkwraps entirely
+    if (npm.config.get("shrinkwrap") === false)
+      return cb(null, data, null)
+
     if (wrap) {
-      log.verbose([where, wrap], "readDependencies: using existing wrap")
+      log.verbose("readDependencies: using existing wrap", [where, wrap])
       var rv = {}
       Object.keys(data).forEach(function (key) {
         rv[key] = data[key]
       })
       rv.dependencies = {}
       Object.keys(wrap).forEach(function (key) {
-        log.verbose([key, wrap[key]], "from wrap")
-        var w = wrap[key]
-        rv.dependencies[key] = w.from || w.version
+        log.verbose("from wrap", [key, wrap[key]])
+        rv.dependencies[key] = readWrap(wrap[key])
       })
-      log.verbose([rv.dependencies], "readDependencies: returned deps")
+      log.verbose("readDependencies returned deps", rv.dependencies)
       return cb(null, rv, wrap)
     }
 
@@ -195,42 +286,60 @@ function readDependencies (context, where, opts, cb) {
 
     fs.readFile(wrapfile, "utf8", function (er, wrapjson) {
       if (er) {
-        log.verbose("readDependencies: using package.json deps")
+        log.verbose("readDependencies", "using package.json deps")
         return cb(null, data, null)
       }
 
+      var newwrap
       try {
-        var newwrap = JSON.parse(wrapjson)
+        newwrap = JSON.parse(wrapjson)
       } catch (ex) {
         return cb(ex)
       }
 
-      log.info(wrapfile, "using shrinkwrap file")
+      log.info("shrinkwrap", "file %j", wrapfile)
       var rv = {}
       Object.keys(data).forEach(function (key) {
         rv[key] = data[key]
       })
       rv.dependencies = {}
       Object.keys(newwrap.dependencies || {}).forEach(function (key) {
-        var w = newwrap.dependencies[key]
-        rv.dependencies[key] = w.from || w.version
+        rv.dependencies[key] = readWrap(newwrap.dependencies[key])
       })
-      log.verbose([rv.dependencies], "readDependencies: returned deps")
+
+      // fold in devDependencies if not already present, at top level
+      if (opts && opts.dev) {
+        Object.keys(data.devDependencies || {}).forEach(function (k) {
+          rv.dependencies[k] = rv.dependencies[k] || data.devDependencies[k]
+        })
+      }
+
+      log.verbose("readDependencies returned deps", rv.dependencies)
       return cb(null, rv, newwrap.dependencies)
     })
   })
 }
 
+function readWrap (w) {
+  return (w.resolved) ? w.resolved
+       : (w.from && url.parse(w.from).protocol) ? w.from
+       : w.version
+}
+
 // if the -S|--save option is specified, then write installed packages
 // as dependencies to a package.json file.
 // This is experimental.
-function save (where, installed, tree, pretty, cb) {
-  if (!npm.config.get("save") &&
+function save (where, installed, tree, pretty, hasArguments, cb) {
+  if (!hasArguments ||
+      !npm.config.get("save") &&
       !npm.config.get("save-dev") &&
       !npm.config.get("save-optional") ||
       npm.config.get("global")) {
     return cb(null, installed, tree, pretty)
   }
+
+  var saveBundle = npm.config.get('save-bundle')
+  var savePrefix = npm.config.get('save-prefix') || "^";
 
   // each item in the tree is a top-level thing that should be saved
   // to the package.json file.
@@ -244,9 +353,10 @@ function save (where, installed, tree, pretty, cb) {
         if (u && u.protocol) w[1] = t.from
         return w
       }).reduce(function (set, k) {
-        var rangeDescriptor = semver.valid(k[1]) &&
-                              semver.gte(k[1], "0.1.0")
-                            ? "~" : ""
+        var rangeDescriptor = semver.valid(k[1], true) &&
+                              semver.gte(k[1], "0.1.0", true) &&
+                              !npm.config.get("save-exact")
+                            ? savePrefix : ""
         set[k[0]] = rangeDescriptor + k[1]
         return set
       }, {})
@@ -260,19 +370,35 @@ function save (where, installed, tree, pretty, cb) {
     } catch (ex) {
       er = ex
     }
+
     if (er) {
       return cb(null, installed, tree, pretty)
-
     }
 
     var deps = npm.config.get("save-optional") ? "optionalDependencies"
              : npm.config.get("save-dev") ? "devDependencies"
              : "dependencies"
 
+    if (saveBundle) {
+      var bundle = data.bundleDependencies || data.bundledDependencies
+      delete data.bundledDependencies
+      if (!Array.isArray(bundle)) bundle = []
+      data.bundleDependencies = bundle.sort()
+    }
+
+    log.verbose('saving', things)
     data[deps] = data[deps] || {}
     Object.keys(things).forEach(function (t) {
       data[deps][t] = things[t]
+      if (saveBundle) {
+        var i = bundle.indexOf(t)
+        if (i === -1) bundle.push(t)
+        data.bundleDependencies = bundle.sort()
+      }
     })
+
+    data[deps] = sortedObject(data[deps])
+
     data = JSON.stringify(data, null, 2) + "\n"
     fs.writeFile(saveTarget, data, function (er) {
       cb(er, installed, tree, pretty)
@@ -325,7 +451,7 @@ function prettify (tree, installed) {
                      if (g) g = " (" + g + ")"
                      return c.what + g
                    })
-                 })
+                 }, "", { unicode: npm.config.get("unicode") })
   }).join("\n")
 }
 
@@ -358,10 +484,10 @@ function treeify (installed) {
     return l
   }, {})
 
-  //log.warn(whatWhere, "whatWhere")
+  // log.warn("install", whatWhere, "whatWhere")
   return Object.keys(whatWhere).reduce(function (l, r) {
     var ww = whatWhere[r]
-    //log.warn([r, ww], "r, ww")
+    //log.warn("r, ww", [r, ww])
     if (!ww.parent) {
       l[r] = ww
     } else {
@@ -388,7 +514,7 @@ function installManyTop (what, where, context, cb_) {
 
   if (context.explicit) return next()
 
-  readJson(path.join(where, "package.json"), function (er, data) {
+  readJson(path.join(where, "package.json"), log.warn, function (er, data) {
     if (er) return next(er)
     lifecycle(data, "preinstall", where, next)
   })
@@ -401,9 +527,6 @@ function installManyTop (what, where, context, cb_) {
 
 function installManyTop_ (what, where, context, cb) {
   var nm = path.resolve(where, "node_modules")
-    , names = context.explicit
-            ? what.map(function (w) { return w.split(/@/).shift() })
-            : []
 
   fs.readdir(nm, function (er, pkgs) {
     if (er) return installMany(what, where, context, cb)
@@ -413,11 +536,14 @@ function installManyTop_ (what, where, context, cb) {
     asyncMap(pkgs.map(function (p) {
       return path.resolve(nm, p, "package.json")
     }), function (jsonfile, cb) {
-      readJson(jsonfile, function (er, data) {
+      readJson(jsonfile, log.warn, function (er, data) {
+        if (er && er.code !== "ENOENT" && er.code !== "ENOTDIR") return cb(er)
         if (er) return cb(null, [])
         return cb(null, [[data.name, data.version]])
       })
     }, function (er, packages) {
+      // if there's nothing in node_modules, then don't freak out.
+      if (er) packages = []
       // add all the existing packages to the family list.
       // however, do not add to the ancestors list.
       packages.forEach(function (p) {
@@ -433,7 +559,8 @@ function installMany (what, where, context, cb) {
   // dependencies we'll iterate below comes from an existing shrinkwrap from a
   // parent level, a new shrinkwrap at this level, or package.json at this
   // level, as well as which shrinkwrap (if any) our dependencies should use.
-  readDependencies(context, where, {}, function (er, data, wrap) {
+  var opt = { dev: npm.config.get("dev") }
+  readDependencies(context, where, opt, function (er, data, wrap) {
     if (er) data = {}
 
     var parent = data
@@ -460,17 +587,22 @@ function installMany (what, where, context, cb) {
       var newPrev = Object.create(context.family)
         , newAnc = Object.create(context.ancestors)
 
-      newAnc[data.name] = data.version
+      if (!context.root) {
+        newAnc[data.name] = data.version
+      }
       targets.forEach(function (t) {
         newPrev[t.name] = t.version
       })
-      log.silly(targets, "resolved")
+      log.silly("resolved", targets)
       targets.filter(function (t) { return t }).forEach(function (t) {
-        log.info(t._id, "into "+where)
+        log.info("install", "%s into %s", t._id, where)
       })
       asyncMap(targets, function (target, cb) {
-        log.info(target._id, "installOne")
-        var newWrap = wrap ? wrap[target.name].dependencies || {} : null
+        log.info("installOne", target._id)
+        var wrapData = wrap ? wrap[target.name] : null
+        var newWrap = wrapData && wrapData.dependencies
+                    ? wrap[target.name].dependencies || {}
+                    : null
         var newContext = { family: newPrev
                          , ancestors: newAnc
                          , parent: parent
@@ -490,8 +622,15 @@ function targetResolver (where, context, deps) {
 
   if (!context.explicit) fs.readdir(nm, function (er, inst) {
     if (er) return alreadyInstalledManually = []
+
+    // don't even mess with non-package looking things
+    inst = inst.filter(function (p) {
+      return !p.match(/^[\._-]/)
+    })
+
     asyncMap(inst, function (pkg, cb) {
-      readJson(path.resolve(nm, pkg, "package.json"), function (er, d) {
+      readJson(path.resolve(nm, pkg, "package.json"), log.warn, function (er, d) {
+        if (er && er.code !== "ENOENT" && er.code !== "ENOTDIR") return cb(er)
         // error means it's not a package, most likely.
         if (er) return cb(null, [])
 
@@ -499,12 +638,21 @@ function targetResolver (where, context, deps) {
         // otherwise, make sure that it's a semver match with what we want.
         var bd = parent.bundleDependencies
         if (bd && bd.indexOf(d.name) !== -1 ||
-            semver.satisfies(d.version, deps[d.name] || "*")) {
+            semver.satisfies(d.version, deps[d.name] || "*", true) ||
+            deps[d.name] === d._resolved) {
           return cb(null, d.name)
         }
 
-        // something is there, but it's not satisfactory.  Clobber it.
-        return cb(null, [])
+        // see if the package had been previously linked
+        fs.lstat(path.resolve(nm, pkg), function(err, s) {
+          if (err) return cb(null, [])
+          if (s.isSymbolicLink()) {
+            return cb(null, d.name)
+          }
+
+          // something is there, but it's not satisfactory.  Clobber it.
+          return cb(null, [])
+        })
       })
     }, function (er, inst) {
       // this is the list of things that are valid and should be ignored.
@@ -521,7 +669,7 @@ function targetResolver (where, context, deps) {
     // now we know what's been installed here manually,
     // or tampered with in some way that npm doesn't want to overwrite.
     if (alreadyInstalledManually.indexOf(what.split("@").shift()) !== -1) {
-      log.verbose("skipping "+what, "already installed in "+where)
+      log.verbose("already installed", "skipping %s %s", what, where)
       return cb(null, [])
     }
 
@@ -529,7 +677,7 @@ function targetResolver (where, context, deps) {
     // If installing from a shrinkwrap, it must match exactly.
     if (context.family[what]) {
       if (wrap && wrap[what].version === context.family[what]) {
-        log.verbose(what, "using existing (matches shrinkwrap)")
+        log.verbose("shrinkwrap", "use existing", what)
         return cb(null, [])
       }
     }
@@ -538,44 +686,56 @@ function targetResolver (where, context, deps) {
     // doing `npm install foo` inside of the foo project.  Print
     // a warning, and skip it.
     if (parent && parent.name === what && !npm.config.get("force")) {
-      log.warn("Refusing to install "+what+" as a dependency of itself"
-              ,"install")
+      log.warn("install", "Refusing to install %s as a dependency of itself"
+              , what)
       return cb(null, [])
     }
 
     if (wrap) {
-      name = what.split(/@/).shift()
+      var name = what.split(/@/).shift()
       if (wrap[name]) {
-        var wrapTarget = wrap[name].from || wrap[name].version
-        log.verbose("resolving "+what+" to "+wrapTarget, "shrinkwrap")
+        var wrapTarget = readWrap(wrap[name])
         what = name + "@" + wrapTarget
       } else {
-        log.verbose("skipping "+what+" (not in shrinkwrap)", "shrinkwrap")
+        log.verbose("shrinkwrap", "skipping %s (not in shrinkwrap)", what)
       }
     } else if (deps[what]) {
       what = what + "@" + deps[what]
     }
 
-    cache.add(what, function (er, data) {
+    // This is where we actually fetch the package, if it's not already
+    // in the cache.
+    // If it's a git repo, then we want to install it, even if the parent
+    // already has a matching copy.
+    // If it's not a git repo, and the parent already has that pkg, then
+    // we can skip installing it again.
+    cache.add(what, null, false, function (er, data) {
       if (er && parent && parent.optionalDependencies &&
           parent.optionalDependencies.hasOwnProperty(what.split("@")[0])) {
-        log.warn(what, "optional dependency failed, continuing")
-        log.verbose([what, er], "optional dependency failed, continuing")
+        log.warn("optional dep failed, continuing", what)
+        log.verbose("optional dep failed, continuing", [what, er])
         return cb(null, [])
       }
+
+      var isGit = false
+        , maybeGit = what.split("@").slice(1).join()
+
+      if (maybeGit)
+        isGit = isGitUrl(url.parse(maybeGit))
 
       if (!er &&
           data &&
           !context.explicit &&
           context.family[data.name] === data.version &&
-          !npm.config.get("force")) {
-        log.info(data.name + "@" + data.version, "already installed")
+          !npm.config.get("force") &&
+          !isGit) {
+        log.info("already installed", data.name + "@" + data.version)
         return cb(null, [])
       }
 
-      if (data) data._from = what
-
-      return cb(er, data)
+      if (data && !data._from) data._from = what
+      if (er && parent && parent.name) er.parent = parent.name
+      return cb(er, data || [])
     })
   }
 }
@@ -594,8 +754,8 @@ function installOne (target, where, context, cb) {
     // check if this one is optional to its parent.
     if (er && context.parent && context.parent.optionalDependencies &&
         context.parent.optionalDependencies.hasOwnProperty(target.name)) {
-      log.warn(target._id, "optional dependency failed, continuing")
-      log.verbose([target._id, er], "optional dependency failed, continuing")
+      log.warn("optional dep failed, continuing", target._id)
+      log.verbose("optional dep failed, continuing", [target._id, er])
       er = null
     }
 
@@ -605,12 +765,13 @@ function installOne (target, where, context, cb) {
 }
 
 function localLink (target, where, context, cb) {
-  log.verbose(target._id, "try to link")
+  log.verbose("localLink", target._id)
   var jsonFile = path.resolve( npm.globalDir, target.name
                              , "package.json" )
     , parent = context.parent
 
-  readJson(jsonFile, function (er, data) {
+  readJson(jsonFile, log.warn, function (er, data) {
+    if (er && er.code !== "ENOENT" && er.code !== "ENOTDIR") return cb(er)
     if (er || data._id === target._id) {
       if (er) {
         install( path.resolve(npm.globalDir, "..")
@@ -623,13 +784,13 @@ function localLink (target, where, context, cb) {
 
       function thenLink () {
         npm.commands.link([target.name], function (er, d) {
-          log.silly([er, d], "back from link")
+          log.silly("localLink", "back from link", [er, d])
           cb(er, [resultList(target, where, parent && parent._id)])
         })
       }
 
     } else {
-      log.verbose(target._id, "install locally (no link)")
+      log.verbose("localLink", "install locally (no link)", target._id)
       installOne_(target, where, context, cb)
     }
   })
@@ -638,14 +799,17 @@ function localLink (target, where, context, cb) {
 function resultList (target, where, parentId) {
   var nm = path.resolve(where, "node_modules")
     , targetFolder = path.resolve(nm, target.name)
-    , prettyWhere = relativize(where, process.cwd() + "/x")
+    , prettyWhere = where
+
+  if (!npm.config.get("global")) {
+    prettyWhere = path.relative(process.cwd(), where)
+  }
 
   if (prettyWhere === ".") prettyWhere = null
 
   if (!npm.config.get("global")) {
     // print out the folder relative to where we are right now.
-    // relativize isn't really made for dirs, so you need this hack
-    targetFolder = relativize(targetFolder, process.cwd()+"/x")
+    targetFolder = path.relative(process.cwd(), targetFolder)
   }
 
   return [ target._id
@@ -655,160 +819,53 @@ function resultList (target, where, parentId) {
          , target._from ]
 }
 
+// name => install locations
+var installOnesInProgress = Object.create(null)
+
+function isIncompatibleInstallOneInProgress(target, where) {
+  return target.name in installOnesInProgress &&
+         installOnesInProgress[target.name].indexOf(where) !== -1
+}
+
 function installOne_ (target, where, context, cb) {
   var nm = path.resolve(where, "node_modules")
     , targetFolder = path.resolve(nm, target.name)
-    , prettyWhere = relativize(where, process.cwd() + "/x")
+    , prettyWhere = path.relative(process.cwd(), where)
     , parent = context.parent
 
   if (prettyWhere === ".") prettyWhere = null
 
+  if (isIncompatibleInstallOneInProgress(target, where)) {
+    // just call back, with no error.  the error will be detected in the
+    // final check for peer-invalid dependencies
+    return cb()
+  }
+
+  if (!(target.name in installOnesInProgress)) {
+    installOnesInProgress[target.name] = []
+  }
+  installOnesInProgress[target.name].push(where)
+  var indexOfIOIP = installOnesInProgress[target.name].length - 1
+    , force = npm.config.get("force")
+    , nodeVersion = npm.config.get("node-version")
+    , strict = npm.config.get("engine-strict")
+    , c = npmInstallChecks
+
   chain
-    ( [ [checkEngine, target]
-      , [checkPlatform, target]
-      , [checkCycle, target, context.ancestors]
-      , [checkGit, targetFolder]
+    ( [ [c.checkEngine, target, npm.version, nodeVersion, force, strict]
+      , [c.checkPlatform, target, force]
+      , [c.checkCycle, target, context.ancestors]
+      , [c.checkGit, targetFolder]
       , [write, target, targetFolder, context] ]
     , function (er, d) {
+        installOnesInProgress[target.name].splice(indexOfIOIP, 1)
+
         if (er) return cb(er)
+
         d.push(resultList(target, where, parent && parent._id))
         cb(er, d)
       }
     )
-}
-
-function checkEngine (target, cb) {
-  var npmv = npm.version
-    , force = npm.config.get("force")
-    , nodev = force ? null : npm.config.get("node-version")
-    , eng = target.engines
-  if (!eng) return cb()
-  if (nodev && eng.node && !semver.satisfies(nodev, eng.node)
-      || eng.npm && !semver.satisfies(npmv, eng.npm)) {
-    var er = new Error("Unsupported")
-    er.errno = npm.ENOTSUP
-    er.required = eng
-    er.pkgid = target._id
-    return cb(er)
-  }
-  return cb()
-}
-
-function checkPlatform (target, cb) {
-  var platform = process.platform
-    , arch = process.arch
-    , osOk = true
-    , cpuOk = true
-    , force = npm.config.get("force")
-
-  if (force) {
-    return cb()
-  }
-
-  if (target.os) {
-    osOk = checkList(platform, target.os)
-  }
-  if (target.cpu) {
-    cpuOk = checkList(arch, target.cpu)
-  }
-  if (!osOk || !cpuOk) {
-    var er = new Error("Unsupported")
-    er.errno = npm.EBADPLATFORM
-    er.os = target.os || ['any']
-    er.cpu = target.cpu || ['any']
-    er.pkgid = target._id
-    return cb(er)
-  }
-  return cb()
-}
-
-function checkList (value, list) {
-  var tmp
-    , match = false
-    , blc = 0
-  if (typeof list === "string") {
-    list = [list]
-  }
-  if (list.length === 1 && list[0] === "any") {
-    return true;
-  }
-  for (var i = 0; i < list.length; ++i) {
-    tmp = list[i]
-    if (tmp[0] === '!') {
-      tmp = tmp.slice(1)
-      if (tmp === value) {
-        return false;
-      }
-      ++blc
-    } else {
-      match = match || tmp === value
-    }
-  }
-  return match || blc === list.length
-}
-
-function checkCycle (target, ancestors, cb) {
-  // there are some very rare and pathological edge-cases where
-  // a cycle can cause npm to try to install a never-ending tree
-  // of stuff.
-  // Simplest:
-  //
-  // A -> B -> A' -> B' -> A -> B -> A' -> B' -> A -> ...
-  //
-  // Solution: Simply flat-out refuse to install any name@version
-  // that is already in the prototype tree of the ancestors object.
-  // A more correct, but more complex, solution would be to symlink
-  // the deeper thing into the new location.
-  // Will do that if anyone whines about this irl.
-  //
-  // Note: `npm install foo` inside of the `foo` package will abort
-  // earlier if `--force` is not set.  However, if it IS set, then
-  // we need to still fail here, but just skip the first level. Of
-  // course, it'll still fail eventually if it's a true cycle, and
-  // leave things in an undefined state, but that's what is to be
-  // expected when `--force` is used.  That is why getPrototypeOf
-  // is used *twice* here: to skip the first level of repetition.
-
-  var p = Object.getPrototypeOf(Object.getPrototypeOf(ancestors))
-    , name = target.name
-    , version = target.version
-  while (p && p !== Object.prototype && p[name] !== version) {
-    p = Object.getPrototypeOf(p)
-  }
-  if (p[name] !== version) return cb()
-
-  var er = new Error("Unresolvable cycle detected")
-  var tree = [target._id, JSON.parse(JSON.stringify(ancestors))]
-    , t = Object.getPrototypeOf(ancestors)
-  while (t && t !== Object.prototype) {
-    if (t === p) t.THIS_IS_P = true
-    tree.push(JSON.parse(JSON.stringify(t)))
-    t = Object.getPrototypeOf(t)
-  }
-  log.verbose(tree, "unresolvable dependency tree")
-  er.pkgid = target._id
-  er.errno = npm.ECYCLE
-  return cb(er)
-}
-
-function checkGit (folder, cb) {
-  // if it's a git repo then don't touch it!
-  fs.lstat(folder, function (er, s) {
-    if (er || !s.isDirectory()) return cb()
-    else checkGit_(folder, cb)
-  })
-}
-
-function checkGit_ (folder, cb) {
-  fs.stat(path.resolve(folder, ".git"), function (er, s) {
-    if (!er && s.isDirectory()) {
-      var e = new Error("Appears to be a git repo or submodule.")
-      e.path = folder
-      e.errno = npm.EISGIT
-      return cb(e)
-    }
-    cb()
-  })
 }
 
 function write (target, targetFolder, context, cb_) {
@@ -823,10 +880,8 @@ function write (target, targetFolder, context, cb_) {
     if (!er) return cb_(er, data)
 
     if (false === npm.config.get("rollback")) return cb_(er)
-    npm.commands.unbuild([targetFolder], function (er2) {
-      if (er2) log.error(er2, "error rolling back "+target._id)
-      return cb_(er, data)
-    })
+    npm.rollbacks.push(targetFolder)
+    cb_(er, data)
   }
 
   var bundled = []
@@ -856,40 +911,69 @@ function write (target, targetFolder, context, cb_) {
       if (er) return cb(er)
 
       // before continuing to installing dependencies, check for a shrinkwrap.
-      readDependencies(context, targetFolder, {}, function (er, data, wrap) {
-        var deps = Object.keys(data.dependencies || {})
+      var opt = { dev: npm.config.get("dev") }
+      readDependencies(context, targetFolder, opt, function (er, data, wrap) {
+        var deps = prepareForInstallMany(data, "dependencies", bundled, wrap,
+            family)
+        var depsTargetFolder = targetFolder
+        var depsContext = { family: family
+                          , ancestors: context.ancestors
+                          , parent: target
+                          , explicit: false
+                          , wrap: wrap }
 
-        // don't install bundleDependencies, unless they're missing.
-        if (data.bundleDependencies) {
-          deps = deps.filter(function (d) {
-            return data.bundleDependencies.indexOf(d) === -1 ||
-                   bundled.indexOf(d) === -1
-          })
+        var peerDeps = prepareForInstallMany(data, "peerDependencies", bundled,
+            wrap, family)
+        var pdTargetFolder = path.resolve(targetFolder, "..", "..")
+        var pdContext = context
+
+        var actions =
+          [ [ installManyAndBuild, deps, depsTargetFolder, depsContext ] ]
+
+        if (peerDeps.length > 0) {
+          actions.push(
+            [ installMany, peerDeps, pdTargetFolder, pdContext ]
+          )
         }
 
-        var newcontext = { family: family
-                         , ancestors: context.ancestors
-                         , parent: target
-                         , explicit: false
-                         , wrap: wrap }
-        installMany(deps.filter(function (d) {
-          // prefer to not install things that are satisfied by
-          // something in the "family" list, unless we're installing
-          // from a shrinkwrap.
-          return wrap || !semver.satisfies(family[d], data.dependencies[d])
-        }).map(function (d) {
-          var t = data.dependencies[d]
-            , parsed = url.parse(t.replace(/^git\+/, "git"))
-          t = d + "@" + t
-          return t
-        }), targetFolder, newcontext, function (er, d) {
-          log.verbose(targetFolder, "about to build")
-          if (er) return cb(er)
-          npm.commands.build( [targetFolder]
-                            , npm.config.get("global")
-                            , true
-                            , function (er) { return cb(er, d) })
-        })
+        chain(actions, cb)
       })
     })
+}
+
+function installManyAndBuild (deps, targetFolder, context, cb) {
+  installMany(deps, targetFolder, context, function (er, d) {
+    log.verbose("about to build", targetFolder)
+    if (er) return cb(er)
+    npm.commands.build( [targetFolder]
+                      , npm.config.get("global")
+                      , true
+                      , function (er) { return cb(er, d) })
+  })
+}
+
+function prepareForInstallMany (packageData, depsKey, bundled, wrap, family) {
+  var deps = Object.keys(packageData[depsKey] || {})
+
+  // don't install bundleDependencies, unless they're missing.
+  if (packageData.bundleDependencies) {
+    deps = deps.filter(function (d) {
+      return packageData.bundleDependencies.indexOf(d) === -1 ||
+             bundled.indexOf(d) === -1
+    })
+  }
+
+  return deps.filter(function (d) {
+    // prefer to not install things that are satisfied by
+    // something in the "family" list, unless we're installing
+    // from a shrinkwrap.
+    if (wrap) return wrap
+    if (semver.validRange(family[d], true))
+      return !semver.satisfies(family[d], packageData[depsKey][d], true)
+    return true
+  }).map(function (d) {
+    var t = packageData[depsKey][d]
+    t = d + "@" + t
+    return t
+  })
 }

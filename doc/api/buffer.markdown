@@ -19,9 +19,10 @@ encoding method.  Here are the different string encodings.
 
 * `'ascii'` - for 7 bit ASCII data only.  This encoding method is very fast, and
   will strip the high bit if set.
-  Note that this encoding converts a null character (`'\0'` or `'\u0000'`) into
-  `0x20` (character code of a space). If you want to convert a null character
-  into `0x00`, you should use `'utf8'`.
+
+  Note that when converting from string to buffer, this encoding converts a null
+  character (`'\0'` or `'\u0000'`) into `0x20` (character code of a space). If
+  you want to convert a null character into `0x00`, you should use `'utf8'`.
 
 * `'utf8'` - Multibyte encoded Unicode characters. Many web pages and other
   document formats use UTF-8.
@@ -39,6 +40,22 @@ encoding method.  Here are the different string encodings.
   will be removed in future versions of Node.
 
 * `'hex'` - Encode each byte as two hexadecimal characters.
+
+Creating a typed array from a `Buffer` works with the following caveats:
+
+1. The buffer's memory is copied, not shared.
+
+2. The buffer's memory is interpreted as an array, not a byte array.  That is,
+   `new Uint32Array(new Buffer([1,2,3,4]))` creates a 4-element `Uint32Array`
+   with elements `[1,2,3,4]`, not an `Uint32Array` with a single element
+   `[0x1020304]` or `[0x4030201]`.
+
+NOTE: Node.js v0.8 simply retained a reference to the buffer in `array.buffer`
+instead of cloning it.
+
+While more efficient, it introduces subtle incompatibilities with the typed
+arrays specification.  `ArrayBuffer#slice()` makes a copy of the slice while
+`Buffer#slice()` creates a view.
 
 ## Class: Buffer
 
@@ -64,6 +81,13 @@ Allocates a new buffer using an `array` of octets.
 
 Allocates a new buffer containing the given `str`.
 `encoding` defaults to `'utf8'`.
+
+### Class Method: Buffer.isEncoding(encoding)
+
+* `encoding` {String} The encoding string to test
+
+Returns true if the `encoding` is a valid encoding argument, or false
+otherwise.
 
 ### buf.write(string, [offset], [length], [encoding])
 
@@ -94,12 +118,41 @@ next time `buf.write()` is called.
 * `start` Number, Optional, Default: 0
 * `end` Number, Optional, Default: `buffer.length`
 
-Decodes and returns a string from buffer data encoded with `encoding`
-(defaults to `'utf8'`) beginning at `start` (defaults to `0`) and ending at
-`end` (defaults to `buffer.length`).
+Decodes and returns a string from buffer data encoded using the specified
+character set encoding. If `encoding` is `undefined` or `null`, then `encoding`
+defaults to `'utf8'. The `start` and `end` parameters default to `0` and
+`buffer.length` when `undefined`.
+
+    buf = new Buffer(26);
+    for (var i = 0 ; i < 26 ; i++) {
+      buf[i] = i + 97; // 97 is ASCII a
+    }
+    buf.toString('ascii'); // outputs: abcdefghijklmnopqrstuvwxyz
+    buf.toString('ascii',0,5); // outputs: abcde
+    buf.toString('utf8',0,5); // outputs: abcde
+    buf.toString(undefined,0,5); // encoding defaults to 'utf8', outputs abcde
 
 See `buffer.write()` example, above.
 
+
+### buf.toJSON()
+
+Returns a JSON-representation of the Buffer instance, which is identical to the
+output for JSON Arrays. `JSON.stringify` implicitly calls this function when
+stringifying a Buffer instance.
+
+Example:
+
+    var buf = new Buffer('test');
+    var json = JSON.stringify(buf);
+
+    console.log(json);
+    // '[116,101,115,116]'
+
+    var copy = new Buffer(JSON.parse(json));
+
+    console.log(copy);
+    // <Buffer 74 65 73 74>
 
 ### buf[index]
 
@@ -148,6 +201,26 @@ Example:
 
     // ½ + ¼ = ¾: 9 characters, 12 bytes
 
+### Class Method: Buffer.concat(list, [totalLength])
+
+* `list` {Array} List of Buffer objects to concat
+* `totalLength` {Number} Total length of the buffers when concatenated
+
+Returns a buffer which is the result of concatenating all the buffers in
+the list together.
+
+If the list has no items, or if the totalLength is 0, then it returns a
+zero-length buffer.
+
+If the list has exactly one item, then the first item of the list is
+returned.
+
+If the list has more than one item, then a new Buffer is created.
+
+If totalLength is not provided, it is read from the buffers in the list.
+However, this adds an additional loop to the function, so it is faster
+to provide the length explicitly.
+
 ### buf.length
 
 * Number
@@ -165,6 +238,17 @@ buffer object.  It does not change when the contents of the buffer are changed.
     // 1234
     // 1234
 
+While the `length` property is not immutable, changing the value of `length`
+can result in undefined and inconsistent behavior. Applications that wish to
+modify the length of a buffer should therefore treat `length` as read-only and
+use `buf.slice` to create a new buffer.
+
+    buf = new Buffer(10);
+    buf.write("abcdefghj", 0, "ascii");
+    console.log(buf.length); // 10
+    buf = buf.slice(0,5);
+    console.log(buf.length); // 5
+
 ### buf.copy(targetBuffer, [targetStart], [sourceStart], [sourceEnd])
 
 * `targetBuffer` Buffer object - Buffer to copy into
@@ -172,9 +256,10 @@ buffer object.  It does not change when the contents of the buffer are changed.
 * `sourceStart` Number, Optional, Default: 0
 * `sourceEnd` Number, Optional, Default: `buffer.length`
 
-Does copy between buffers. The source and target regions can be overlapped.
-`targetStart` and `sourceStart` default to `0`.
-`sourceEnd` defaults to `buffer.length`.
+Copies data from a region of this buffer to a region in the target buffer even
+if the target memory region overlaps with the source. If `undefined` the
+`targetStart` and `sourceStart` parameters default to `0` while `sourceEnd`
+defaults to `buffer.length`.
 
 Example: build two Buffers, then copy `buf1` from byte 16 through byte 19
 into `buf2`, starting at the 8th byte in `buf2`.
@@ -192,6 +277,20 @@ into `buf2`, starting at the 8th byte in `buf2`.
 
     // !!!!!!!!qrst!!!!!!!!!!!!!
 
+Example: Build a single buffer, then copy data from one region to an overlapping
+region in the same buffer
+
+    buf = new Buffer(26);
+
+    for (var i = 0 ; i < 26 ; i++) {
+      buf[i] = i + 97; // 97 is ASCII a
+    }
+
+    buf.copy(buf, 0, 4, 10);
+    console.log(buf.toString());
+
+    // efghijghijklmnopqrstuvwxyz
+
 
 ### buf.slice([start], [end])
 
@@ -200,7 +299,7 @@ into `buf2`, starting at the 8th byte in `buf2`.
 
 Returns a new buffer which references the same memory as the old, but offset
 and cropped by the `start` (defaults to `0`) and `end` (defaults to
-`buffer.length`) indexes.
+`buffer.length`) indexes.  Negative indexes start from the end of the buffer.
 
 **Modifying the new buffer slice will modify memory in the original buffer!**
 
@@ -563,7 +662,7 @@ complement signed integer into `buffer`.
 * `noAssert` Boolean, Optional, Default: false
 
 Writes `value` to the buffer at the specified offset with specified endian
-format. Note, `value` must be a valid 32 bit float.
+format. Note, behavior is unspecified if `value` is not a 32 bit float.
 
 Set `noAssert` to true to skip validation of `value` and `offset`. This means
 that `value` may be too large for the specific function and `offset` may be

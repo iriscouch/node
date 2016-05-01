@@ -106,6 +106,13 @@ void DefineConstants(Handle<Object> target) {
   NODE_DEFINE_CONSTANT(target, O_SYMLINK);
 #endif
 
+#ifdef O_DIRECT
+  NODE_DEFINE_CONSTANT(target, O_DIRECT);
+#endif
+
+#ifdef O_NONBLOCK
+  NODE_DEFINE_CONSTANT(target, O_NONBLOCK);
+#endif
 
 #ifdef S_IRWXU
   NODE_DEFINE_CONSTANT(target, S_IRWXU);
@@ -789,6 +796,10 @@ void DefineConstants(Handle<Object> target) {
 
 #ifdef SIGTSTP
   NODE_DEFINE_CONSTANT(target, SIGTSTP);
+#endif
+
+#ifdef SIGBREAK
+  NODE_DEFINE_CONSTANT(target, SIGBREAK);
 #endif
 
 #ifdef SIGTTIN

@@ -1,4 +1,4 @@
-// Copyright 2011 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -71,6 +71,27 @@ int signbit(double x);
 
 int strncasecmp(const char* s1, const char* s2, int n);
 
+// Visual C++ 2013 and higher implement this function.
+#if (_MSC_VER < 1800)
+inline int lrint(double flt) {
+  int intgr;
+#if defined(V8_TARGET_ARCH_IA32)
+  __asm {
+    fld flt
+    fistp intgr
+  };
+#else
+  intgr = static_cast<int>(flt + 0.5);
+  if ((intgr & 1) != 0 && intgr - flt == 0.5) {
+    // If the number is halfway between two integers, round to the even one.
+    intgr--;
+  }
+#endif
+  return intgr;
+}
+
+#endif  // _MSC_VER < 1800
+
 #endif  // _MSC_VER
 
 // Random is missing on both Visual Studio and MinGW.
@@ -89,7 +110,11 @@ namespace internal {
 
 // Use AtomicWord for a machine-sized pointer. It is assumed that
 // reads and writes of naturally aligned values of this type are atomic.
+#if defined(__OpenBSD__) && defined(__i386__)
+typedef Atomic32 AtomicWord;
+#else
 typedef intptr_t AtomicWord;
+#endif
 
 class Semaphore;
 class Mutex;
@@ -122,6 +147,9 @@ class OS {
   // Initializes the platform OS support that depend on CPU features. This is
   // called after CPU initialization.
   static void PostSetUp();
+
+  // Clean up platform-OS-related things. Called once at VM shutdown.
+  static void TearDown();
 
   // Returns the accumulated user time for thread. This routine
   // can be used for profiling. The implementation should
@@ -283,6 +311,9 @@ class OS {
   // Returns the double constant NAN
   static double nan_value();
 
+  // Support runtime detection of Cpu implementer
+  static CpuImplementer GetCpuImplementer();
+
   // Support runtime detection of VFP3 on ARM CPUs.
   static bool ArmCpuHasFeature(CpuFeature feature);
 
@@ -313,6 +344,8 @@ class OS {
   }
   static const int kMinComplexMemCopy = 256;
 #endif  // V8_TARGET_ARCH_IA32
+
+  static int GetCurrentProcessId();
 
  private:
   static const int msPerSecond = 1000;
@@ -650,6 +683,7 @@ class Socket {
   virtual bool Shutdown() = 0;
 
   // Data Transimission
+  // Return 0 on failure.
   virtual int Send(const char* data, int len) const = 0;
   virtual int Receive(char* data, int len) const = 0;
 

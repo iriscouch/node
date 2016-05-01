@@ -25,36 +25,38 @@
 #include "req_wrap.h"
 #include "handle_wrap.h"
 #include "udp_wrap.h"
+#include "util.h"
 
 #include <stdlib.h>
 
 #define SLAB_SIZE (1024 * 1024)
 
-// Temporary hack: libuv should provide uv_inet_pton and uv_inet_ntop.
-// Clean this up in tcp_wrap.cc too.
-#if defined(__MINGW32__) || defined(_MSC_VER)
-  extern "C" {
-#   include <inet_net_pton.h>
-#   include <inet_ntop.h>
-  }
-# define uv_inet_pton ares_inet_pton
-# define uv_inet_ntop ares_inet_ntop
-
-#else // __POSIX__
-# include <arpa/inet.h>
-# define uv_inet_pton inet_pton
-# define uv_inet_ntop inet_ntop
-#endif
-
-using namespace v8;
 
 namespace node {
+
+using v8::AccessorInfo;
+using v8::Arguments;
+using v8::False;
+using v8::Function;
+using v8::FunctionTemplate;
+using v8::Handle;
+using v8::HandleScope;
+using v8::Integer;
+using v8::Local;
+using v8::Null;
+using v8::Object;
+using v8::Persistent;
+using v8::PropertyAttribute;
+using v8::String;
+using v8::True;
+using v8::Value;
 
 typedef ReqWrap<uv_udp_send_t> SendWrap;
 
 // see tcp_wrap.cc
 Local<Object> AddressToJS(const sockaddr* addr);
 
+static Persistent<Function> constructor;
 static Persistent<String> buffer_sym;
 static Persistent<String> oncomplete_sym;
 static Persistent<String> onmessage_sym;
@@ -95,6 +97,15 @@ void UDPWrap::Initialize(Handle<Object> target) {
   t->InstanceTemplate()->SetInternalFieldCount(1);
   t->SetClassName(String::NewSymbol("UDP"));
 
+  enum PropertyAttribute attributes =
+      static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontDelete);
+  t->InstanceTemplate()->SetAccessor(String::New("fd"),
+                                     UDPWrap::GetFD,
+                                     NULL,
+                                     Handle<Value>(),
+                                     v8::DEFAULT,
+                                     attributes);
+
   NODE_SET_PROTOTYPE_METHOD(t, "bind", Bind);
   NODE_SET_PROTOTYPE_METHOD(t, "send", Send);
   NODE_SET_PROTOTYPE_METHOD(t, "bind6", Bind6);
@@ -110,8 +121,12 @@ void UDPWrap::Initialize(Handle<Object> target) {
   NODE_SET_PROTOTYPE_METHOD(t, "setBroadcast", SetBroadcast);
   NODE_SET_PROTOTYPE_METHOD(t, "setTTL", SetTTL);
 
-  target->Set(String::NewSymbol("UDP"),
-              Persistent<FunctionTemplate>::New(t)->GetFunction());
+  NODE_SET_PROTOTYPE_METHOD(t, "ref", HandleWrap::Ref);
+  NODE_SET_PROTOTYPE_METHOD(t, "unref", HandleWrap::Unref);
+
+  constructor = Persistent<Function>::New(
+      Persistent<FunctionTemplate>::New(t)->GetFunction());
+  target->Set(String::NewSymbol("UDP"), constructor);
 }
 
 
@@ -124,6 +139,19 @@ Handle<Value> UDPWrap::New(const Arguments& args) {
   return scope.Close(args.This());
 }
 
+
+Handle<Value> UDPWrap::GetFD(Local<String>, const AccessorInfo& args) {
+#if defined(_WIN32)
+  return v8::Null();
+#else
+  HandleScope scope;
+  UNWRAP_NO_ABORT(UDPWrap)
+  int fd = (wrap == NULL) ? -1 : wrap->handle_.io_watcher.fd;
+  return scope.Close(Integer::New(fd));
+#endif
+}
+
+
 Handle<Value> UDPWrap::DoBind(const Arguments& args, int family) {
   HandleScope scope;
   int r;
@@ -133,7 +161,7 @@ Handle<Value> UDPWrap::DoBind(const Arguments& args, int family) {
   // bind(ip, port, flags)
   assert(args.Length() == 3);
 
-  String::Utf8Value address(args[0]);
+  node::Utf8Value address(args[0]);
   const int port = args[1]->Uint32Value();
   const int flags = args[2]->Uint32Value();
 
@@ -169,7 +197,7 @@ Handle<Value> UDPWrap::Bind6(const Arguments& args) {
 #define X(name, fn)                                                           \
   Handle<Value> UDPWrap::name(const Arguments& args) {                        \
     HandleScope scope;                                                        \
-    UNWRAP(UDPWrap)                                                                    \
+    UNWRAP(UDPWrap)                                                           \
     assert(args.Length() == 1);                                               \
     int flag = args[0]->Int32Value();                                         \
     int r = fn(&wrap->handle_, flag);                                         \
@@ -192,8 +220,8 @@ Handle<Value> UDPWrap::SetMembership(const Arguments& args,
 
   assert(args.Length() == 2);
 
-  String::Utf8Value address(args[0]);
-  String::Utf8Value iface(args[1]);
+  node::Utf8Value address(args[0]);
+  node::Utf8Value iface(args[1]);
 
   const char* iface_cstr = *iface;
   if (args[1]->IsUndefined() || args[1]->IsNull()) {
@@ -244,7 +272,7 @@ Handle<Value> UDPWrap::DoSend(const Arguments& args, int family) {
                              length);
 
   const unsigned short port = args[3]->Uint32Value();
-  String::Utf8Value address(args[4]);
+  node::Utf8Value address(args[4]);
 
   switch (family) {
   case AF_INET:
@@ -401,6 +429,17 @@ UDPWrap* UDPWrap::Unwrap(Local<Object> obj) {
   assert(!obj.IsEmpty());
   assert(obj->InternalFieldCount() > 0);
   return static_cast<UDPWrap*>(obj->GetPointerFromInternalField(0));
+}
+
+
+Local<Object> UDPWrap::Instantiate() {
+  // If this assert fires then Initialize hasn't been called yet.
+  assert(constructor.IsEmpty() == false);
+
+  HandleScope scope;
+  Local<Object> obj = constructor->NewInstance();
+
+  return scope.Close(obj);
 }
 
 

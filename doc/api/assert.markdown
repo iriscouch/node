@@ -9,7 +9,7 @@ access it with `require('assert')`.
 
 Throws an exception that displays the values for `actual` and `expected` separated by the provided operator.
 
-## assert(value, message), assert.ok(value, [message])
+## assert(value, [message]), assert.ok(value, [message])
 
 Tests if value is truthy, it is equivalent to `assert.equal(true, !!value, message);`
 
@@ -39,7 +39,7 @@ Tests strict non-equality, as determined by the strict not equal operator ( `!==
 
 ## assert.throws(block, [error], [message])
 
-Expects `block` to throw an error. `error` can be constructor, regexp or 
+Expects `block` to throw an error. `error` can be constructor, `RegExp` or
 validation function.
 
 Validate instanceof using constructor:
@@ -74,9 +74,9 @@ Custom error validation:
       "unexpected error"
     );
 
-## assert.doesNotThrow(block, [error], [message])
+## assert.doesNotThrow(block, [message])
 
-Expects `block` not to throw an error, see assert.throws for details.
+Expects `block` not to throw an error, see `assert.throws` for details.
 
 ## assert.ifError(value)
 

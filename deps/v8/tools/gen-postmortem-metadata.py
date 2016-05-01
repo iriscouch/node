@@ -76,18 +76,47 @@ consts_misc = [
     { 'name': 'SmiTag',                 'value': 'kSmiTag' },
     { 'name': 'SmiTagMask',             'value': 'kSmiTagMask' },
     { 'name': 'SmiValueShift',          'value': 'kSmiTagSize' },
+    { 'name': 'SmiShiftSize',           'value': 'kSmiShiftSize' },
     { 'name': 'PointerSizeLog2',        'value': 'kPointerSizeLog2' },
 
-    { 'name': 'prop_idx_content',
-        'value': 'DescriptorArray::kContentArrayIndex' },
+    { 'name': 'OddballFalse',           'value': 'Oddball::kFalse' },
+    { 'name': 'OddballTrue',            'value': 'Oddball::kTrue' },
+    { 'name': 'OddballTheHole',         'value': 'Oddball::kTheHole' },
+    { 'name': 'OddballNull',            'value': 'Oddball::kNull' },
+    { 'name': 'OddballArgumentMarker',  'value': 'Oddball::kArgumentMarker' },
+    { 'name': 'OddballUndefined',       'value': 'Oddball::kUndefined' },
+    { 'name': 'OddballOther',           'value': 'Oddball::kOther' },
+
+    { 'name': 'prop_desc_key',
+        'value': 'DescriptorArray::kDescriptorKey' },
+    { 'name': 'prop_desc_details',
+        'value': 'DescriptorArray::kDescriptorDetails' },
+    { 'name': 'prop_desc_value',
+        'value': 'DescriptorArray::kDescriptorValue' },
+    { 'name': 'prop_desc_size',
+        'value': 'DescriptorArray::kDescriptorSize' },
     { 'name': 'prop_idx_first',
         'value': 'DescriptorArray::kFirstIndex' },
     { 'name': 'prop_type_field',
         'value': 'FIELD' },
     { 'name': 'prop_type_first_phantom',
-        'value': 'MAP_TRANSITION' },
+        'value': 'Code::MAP_TRANSITION' },
     { 'name': 'prop_type_mask',
         'value': 'PropertyDetails::TypeField::kMask' },
+
+    { 'name': 'bit_field2_elements_kind_mask',
+       'value': 'Map::kElementsKindMask' },
+    { 'name': 'bit_field2_elements_kind_shift',
+       'value': 'Map::kElementsKindShift' },
+    { 'name': 'bit_field3_dictionary_map_shift',
+        'value': 'Map::DictionaryMap::kShift' },
+
+    { 'name': 'elements_fast_holey_elements',
+        'value': 'FAST_HOLEY_ELEMENTS' },
+    { 'name': 'elements_fast_elements',
+        'value': 'FAST_ELEMENTS' },
+    { 'name': 'elements_dictionary_elements',
+        'value': 'DICTIONARY_ELEMENTS' },
 
     { 'name': 'off_fp_context',
         'value': 'StandardFrameConstants::kContextOffset' },
@@ -107,9 +136,18 @@ extras_accessors = [
     'JSObject, elements, Object, kElementsOffset',
     'FixedArray, data, uintptr_t, kHeaderSize',
     'Map, instance_attributes, int, kInstanceAttributesOffset',
-    'Map, instance_descriptors, int, kInstanceDescriptorsOrBitField3Offset',
+    'Map, transitions, uintptr_t, kTransitionsOrBackPointerOffset',
     'Map, inobject_properties, int, kInObjectPropertiesOffset',
     'Map, instance_size, int, kInstanceSizeOffset',
+    'Map, bit_field, char, kBitFieldOffset',
+    'Map, bit_field2, char, kBitField2Offset',
+    'Map, prototype, Object, kPrototypeOffset',
+    'StringDictionaryShape, prefix_size, int, kPrefixSize',
+    'StringDictionaryShape, entry_size, int, kEntrySize',
+    'SeededNumberDictionaryShape, prefix_size, int, kPrefixSize',
+    'UnseededNumberDictionaryShape, prefix_size, int, kPrefixSize',
+    'NumberDictionaryShape, entry_size, int, kEntrySize',
+    'Oddball, kind_offset, int, kKindOffset',
     'HeapNumber, value, double, kValueOffset',
     'ConsString, first, String, kFirstOffset',
     'ConsString, second, String, kSecondOffset',
@@ -349,7 +387,7 @@ def parse_field(call):
                     'value': '%s::%s' % (klass, offset)
                 });
 
-        assert(kind == 'SMI_ACCESSORS');
+        assert(kind == 'SMI_ACCESSORS' or kind == 'ACCESSORS_TO_SMI');
         klass = args[0];
         field = args[1];
         offset = args[2];
@@ -373,7 +411,8 @@ def load_fields():
         # may span multiple lines and may contain nested parentheses.  We also
         # call parse_field() to pick apart the invocation.
         #
-        prefixes = [ 'ACCESSORS', 'ACCESSORS_GCSAFE', 'SMI_ACCESSORS' ];
+        prefixes = [ 'ACCESSORS', 'ACCESSORS_GCSAFE',
+                     'SMI_ACCESSORS', 'ACCESSORS_TO_SMI' ];
         current = '';
         opens = 0;
 

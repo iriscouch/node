@@ -58,24 +58,20 @@
                 # has some sources to link into the component.
                 '../../src/v8dll-main.cc',
               ],
+              'defines': [
+                'V8_SHARED',
+                'BUILDING_V8_SHARED',
+              ],
+              'direct_dependent_settings': {
+                'defines': [
+                  'V8_SHARED',
+                  'USING_V8_SHARED',
+                ],
+              },
               'conditions': [
-                ['OS=="win"', {
-                  'defines': [
-                    'BUILDING_V8_SHARED',
-                  ],
-                  'direct_dependent_settings': {
-                    'defines': [
-                      'USING_V8_SHARED',
-                    ],
-                  },
-                }, {
-                  'defines': [
-                    'V8_SHARED',
-                  ],
-                  'direct_dependent_settings': {
-                    'defines': [
-                      'V8_SHARED',
-                    ],
+                ['OS=="mac"', {
+                  'xcode_settings': {
+                    'OTHER_LDFLAGS': ['-dynamiclib', '-all_load']
                   },
                 }],
                 ['soname_version!=""', {
@@ -105,27 +101,16 @@
               'dependencies': ['mksnapshot', 'js2c'],
             }],
             ['component=="shared_library"', {
-              'conditions': [
-                ['OS=="win"', {
-                  'defines': [
-                    'BUILDING_V8_SHARED',
-                  ],
-                  'direct_dependent_settings': {
-                    'defines': [
-                      'USING_V8_SHARED',
-                    ],
-                  },
-                }, {
-                  'defines': [
-                    'V8_SHARED',
-                  ],
-                  'direct_dependent_settings': {
-                    'defines': [
-                      'V8_SHARED',
-                    ],
-                  },
-                }],
+              'defines': [
+                'V8_SHARED',
+                'BUILDING_V8_SHARED',
               ],
+              'direct_dependent_settings': {
+                'defines': [
+                  'V8_SHARED',
+                  'USING_V8_SHARED',
+                ],
+              },
             }],
           ],
           'dependencies': [
@@ -249,10 +234,10 @@
             '../../src/ast.h',
             '../../src/atomicops.h',
             '../../src/atomicops_internals_x86_gcc.cc',
-            '../../src/bignum.cc',
-            '../../src/bignum.h',
             '../../src/bignum-dtoa.cc',
             '../../src/bignum-dtoa.h',
+            '../../src/bignum.cc',
+            '../../src/bignum.h',
             '../../src/bootstrapper.cc',
             '../../src/bootstrapper.h',
             '../../src/builtins.cc',
@@ -283,21 +268,21 @@
             '../../src/conversions.h',
             '../../src/counters.cc',
             '../../src/counters.h',
-            '../../src/cpu.h',
             '../../src/cpu-profiler-inl.h',
             '../../src/cpu-profiler.cc',
             '../../src/cpu-profiler.h',
+            '../../src/cpu.h',
             '../../src/data-flow.cc',
             '../../src/data-flow.h',
             '../../src/date.cc',
             '../../src/date.h',
+            '../../src/dateparser-inl.h',
             '../../src/dateparser.cc',
             '../../src/dateparser.h',
-            '../../src/dateparser-inl.h',
-            '../../src/debug.cc',
-            '../../src/debug.h',
             '../../src/debug-agent.cc',
             '../../src/debug-agent.h',
+            '../../src/debug.cc',
+            '../../src/debug.h',
             '../../src/deoptimizer.cc',
             '../../src/deoptimizer.h',
             '../../src/disasm.h',
@@ -308,17 +293,25 @@
             '../../src/double.h',
             '../../src/dtoa.cc',
             '../../src/dtoa.h',
+            '../../src/elements-kind.cc',
+            '../../src/elements-kind.h',
             '../../src/elements.cc',
             '../../src/elements.h',
             '../../src/execution.cc',
             '../../src/execution.h',
+            '../../src/extensions/externalize-string-extension.cc',
+            '../../src/extensions/externalize-string-extension.h',
+            '../../src/extensions/gc-extension.cc',
+            '../../src/extensions/gc-extension.h',
+            '../../src/extensions/statistics-extension.cc',
+            '../../src/extensions/statistics-extension.h',
             '../../src/factory.cc',
             '../../src/factory.h',
             '../../src/fast-dtoa.cc',
             '../../src/fast-dtoa.h',
-            '../../src/flag-definitions.h',
             '../../src/fixed-dtoa.cc',
             '../../src/fixed-dtoa.h',
+            '../../src/flag-definitions.h',
             '../../src/flags.cc',
             '../../src/flags.h',
             '../../src/frames-inl.h',
@@ -328,6 +321,8 @@
             '../../src/full-codegen.h',
             '../../src/func-name-inferrer.cc',
             '../../src/func-name-inferrer.h',
+            '../../src/gdb-jit.cc',
+            '../../src/gdb-jit.h',
             '../../src/global-handles.cc',
             '../../src/global-handles.h',
             '../../src/globals.h',
@@ -336,14 +331,14 @@
             '../../src/handles.h',
             '../../src/hashmap.h',
             '../../src/heap-inl.h',
-            '../../src/heap.cc',
-            '../../src/heap.h',
             '../../src/heap-profiler.cc',
             '../../src/heap-profiler.h',
-            '../../src/hydrogen.cc',
-            '../../src/hydrogen.h',
+            '../../src/heap.cc',
+            '../../src/heap.h',
             '../../src/hydrogen-instructions.cc',
             '../../src/hydrogen-instructions.h',
+            '../../src/hydrogen.cc',
+            '../../src/hydrogen.h',
             '../../src/ic-inl.h',
             '../../src/ic.cc',
             '../../src/ic.h',
@@ -355,19 +350,19 @@
             '../../src/interface.h',
             '../../src/interpreter-irregexp.cc',
             '../../src/interpreter-irregexp.h',
+            '../../src/isolate.cc',
+            '../../src/isolate.h',
             '../../src/json-parser.h',
             '../../src/jsregexp.cc',
             '../../src/jsregexp.h',
-            '../../src/isolate.cc',
-            '../../src/isolate.h',
-            '../../src/lazy-instance.h'
+            '../../src/lazy-instance.h',
             '../../src/list-inl.h',
             '../../src/list.h',
-            '../../src/lithium.cc',
-            '../../src/lithium.h',
+            '../../src/lithium-allocator-inl.h',
             '../../src/lithium-allocator.cc',
             '../../src/lithium-allocator.h',
-            '../../src/lithium-allocator-inl.h',
+            '../../src/lithium.cc',
+            '../../src/lithium.h',
             '../../src/liveedit.cc',
             '../../src/liveedit.h',
             '../../src/liveobjectlist-inl.h',
@@ -385,14 +380,16 @@
             '../../src/messages.h',
             '../../src/natives.h',
             '../../src/objects-debug.cc',
-            '../../src/objects-printer.cc',
             '../../src/objects-inl.h',
+            '../../src/objects-printer.cc',
             '../../src/objects-visiting.cc',
             '../../src/objects-visiting.h',
             '../../src/objects.cc',
             '../../src/objects.h',
             '../../src/once.cc',
             '../../src/once.h',
+            '../../src/optimizing-compiler-thread.h',
+            '../../src/optimizing-compiler-thread.cc',
             '../../src/parser.cc',
             '../../src/parser.h',
             '../../src/platform-posix.h',
@@ -407,12 +404,12 @@
             '../../src/preparser.h',
             '../../src/prettyprinter.cc',
             '../../src/prettyprinter.h',
-            '../../src/property.cc',
-            '../../src/property.h',
-            '../../src/property-details.h',
             '../../src/profile-generator-inl.h',
             '../../src/profile-generator.cc',
             '../../src/profile-generator.h',
+            '../../src/property-details.h',
+            '../../src/property.cc',
+            '../../src/property.h',
             '../../src/regexp-macro-assembler-irregexp-inl.h',
             '../../src/regexp-macro-assembler-irregexp.cc',
             '../../src/regexp-macro-assembler-irregexp.h',
@@ -424,16 +421,16 @@
             '../../src/regexp-stack.h',
             '../../src/rewriter.cc',
             '../../src/rewriter.h',
-            '../../src/runtime.cc',
-            '../../src/runtime.h',
             '../../src/runtime-profiler.cc',
             '../../src/runtime-profiler.h',
+            '../../src/runtime.cc',
+            '../../src/runtime.h',
             '../../src/safepoint-table.cc',
             '../../src/safepoint-table.h',
-            '../../src/scanner.cc',
-            '../../src/scanner.h',
             '../../src/scanner-character-streams.cc',
             '../../src/scanner-character-streams.h',
+            '../../src/scanner.cc',
+            '../../src/scanner.h',
             '../../src/scopeinfo.cc',
             '../../src/scopeinfo.h',
             '../../src/scopes.cc',
@@ -441,7 +438,7 @@
             '../../src/serialize.cc',
             '../../src/serialize.h',
             '../../src/small-pointer-list.h',
-            '../../src/smart-array-pointer.h',
+            '../../src/smart-pointers.h',
             '../../src/snapshot-common.cc',
             '../../src/snapshot.h',
             '../../src/spaces-inl.h',
@@ -460,6 +457,9 @@
             '../../src/stub-cache.h',
             '../../src/token.cc',
             '../../src/token.h',
+            '../../src/transitions-inl.h',
+            '../../src/transitions.cc',
+            '../../src/transitions.h',
             '../../src/type-info.cc',
             '../../src/type-info.h',
             '../../src/unbound-queue-inl.h',
@@ -492,10 +492,6 @@
             '../../src/zone-inl.h',
             '../../src/zone.cc',
             '../../src/zone.h',
-            '../../src/extensions/externalize-string-extension.cc',
-            '../../src/extensions/externalize-string-extension.h',
-            '../../src/extensions/gc-extension.cc',
-            '../../src/extensions/gc-extension.h',
           ],
           'conditions': [
             ['want_separate_host_toolset==1', {
@@ -568,7 +564,7 @@
                 '../../src/ia32/stub-cache-ia32.cc',
               ],
             }],
-            ['v8_target_arch=="mips"', {
+            ['v8_target_arch=="mipsel"', {
               'sources': [
                 '../../src/mips/assembler-mips.cc',
                 '../../src/mips/assembler-mips.h',
@@ -647,6 +643,12 @@
                   '../../src/platform-linux.cc',
                   '../../src/platform-posix.cc'
                 ],
+                # XXX(bnoordhuis) Pull in definitions for clock_getres()
+                # and clock_gettime() with glibc < 2.17.
+                'libraries': [ '-lrt' ],
+                'direct_dependent_settings': {
+                  'libraries': [ '-lrt' ],
+                },
               }
             ],
             ['OS=="android"', {
@@ -713,7 +715,7 @@
             ['OS=="solaris"', {
                 'link_settings': {
                   'libraries': [
-                    '-lsocket -lnsl',
+                    '-lsocket -lnsl -lrt',
                 ]},
                 'sources': [
                   '../../src/platform-solaris.cc',

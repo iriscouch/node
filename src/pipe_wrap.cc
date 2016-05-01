@@ -28,20 +28,21 @@
 
 namespace node {
 
-using v8::Object;
-using v8::Handle;
-using v8::Local;
-using v8::Persistent;
-using v8::Value;
-using v8::HandleScope;
-using v8::FunctionTemplate;
-using v8::String;
-using v8::Function;
-using v8::TryCatch;
-using v8::Context;
 using v8::Arguments;
-using v8::Integer;
 using v8::Boolean;
+using v8::Context;
+using v8::Function;
+using v8::FunctionTemplate;
+using v8::Handle;
+using v8::HandleScope;
+using v8::Integer;
+using v8::Local;
+using v8::Object;
+using v8::Persistent;
+using v8::PropertyAttribute;
+using v8::String;
+using v8::TryCatch;
+using v8::Value;
 
 Persistent<Function> pipeConstructor;
 
@@ -82,8 +83,18 @@ void PipeWrap::Initialize(Handle<Object> target) {
 
   t->InstanceTemplate()->SetInternalFieldCount(1);
 
+  enum PropertyAttribute attributes =
+      static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontDelete);
+  t->InstanceTemplate()->SetAccessor(String::New("fd"),
+                                     StreamWrap::GetFD,
+                                     NULL,
+                                     Handle<Value>(),
+                                     v8::DEFAULT,
+                                     attributes);
+
   NODE_SET_PROTOTYPE_METHOD(t, "close", HandleWrap::Close);
   NODE_SET_PROTOTYPE_METHOD(t, "unref", HandleWrap::Unref);
+  NODE_SET_PROTOTYPE_METHOD(t, "ref", HandleWrap::Ref);
 
   NODE_SET_PROTOTYPE_METHOD(t, "readStart", StreamWrap::ReadStart);
   NODE_SET_PROTOTYPE_METHOD(t, "readStop", StreamWrap::ReadStop);
@@ -128,7 +139,7 @@ PipeWrap::PipeWrap(Handle<Object> object, bool ipc)
   int r = uv_pipe_init(uv_default_loop(), &handle_, ipc);
   assert(r == 0); // How do we proxy this error up to javascript?
                   // Suggestion: uv_pipe_init() returns void.
-  handle_.data = reinterpret_cast<void*>(this);
+  handle_.data = static_cast<void*>(this);
   UpdateWriteQueueSize();
 }
 
@@ -258,9 +269,10 @@ Handle<Value> PipeWrap::Open(const Arguments& args) {
 
   UNWRAP(PipeWrap)
 
-  int fd = args[0]->IntegerValue();
-
-  uv_pipe_open(&wrap->handle_, fd);
+  if (uv_pipe_open(&wrap->handle_, args[0]->Int32Value())) {
+    uv_err_t err = uv_last_error(wrap->handle_.loop);
+    return ThrowException(UVException(err.code, "uv_pipe_open"));
+  }
 
   return scope.Close(v8::Null());
 }

@@ -448,6 +448,11 @@ void GlobalHandles::MarkIndependent(Object** location) {
 }
 
 
+bool GlobalHandles::IsIndependent(Object** location) {
+  return Node::FromLocation(location)->is_independent();
+}
+
+
 bool GlobalHandles::IsNearDeath(Object** location) {
   return Node::FromLocation(location)->IsNearDeath();
 }
@@ -462,6 +467,9 @@ void GlobalHandles::SetWrapperClassId(Object** location, uint16_t class_id) {
   Node::FromLocation(location)->set_wrapper_class_id(class_id);
 }
 
+uint16_t GlobalHandles::GetWrapperClassId(Object** location) {
+  return Node::FromLocation(location)->wrapper_class_id();
+}
 
 void GlobalHandles::IterateWeakRoots(ObjectVisitor* v) {
   for (NodeIterator it(this); !it.done(); it.Advance()) {
@@ -602,7 +610,7 @@ void GlobalHandles::IterateAllRoots(ObjectVisitor* v) {
 
 void GlobalHandles::IterateAllRootsWithClassIds(ObjectVisitor* v) {
   for (NodeIterator it(this); !it.done(); it.Advance()) {
-    if (it.node()->has_wrapper_class_id() && it.node()->IsRetainer()) {
+    if (it.node()->IsRetainer() && it.node()->has_wrapper_class_id()) {
       v->VisitEmbedderReference(it.node()->location(),
                                 it.node()->wrapper_class_id());
     }

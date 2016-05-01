@@ -94,18 +94,8 @@ double ceiling(double x) {
 static Mutex* limit_mutex = NULL;
 
 
-void OS::SetUp() {
-  // Seed the random number generator. We preserve microsecond resolution.
-  uint64_t seed = Ticks() ^ (getpid() << 16);
-  srandom(static_cast<unsigned int>(seed));
-  limit_mutex = CreateMutex();
-}
-
-
 void OS::PostSetUp() {
-  // Math functions depend on CPU features therefore they are initialized after
-  // CPU.
-  MathSetup();
+  POSIXPostSetUp();
 }
 
 
@@ -650,11 +640,6 @@ void Thread::SetThreadLocal(LocalStorageKey key, void* value) {
 }
 
 
-void Thread::YieldCPU() {
-  sched_yield();
-}
-
-
 class MacOSMutex : public Mutex {
  public:
   MacOSMutex() {
@@ -692,17 +677,27 @@ Mutex* OS::CreateMutex() {
 class MacOSSemaphore : public Semaphore {
  public:
   explicit MacOSSemaphore(int count) {
-    semaphore_create(mach_task_self(), &semaphore_, SYNC_POLICY_FIFO, count);
+    int r;
+    r = semaphore_create(mach_task_self(),
+                         &semaphore_,
+                         SYNC_POLICY_FIFO,
+                         count);
+    ASSERT(r == KERN_SUCCESS);
   }
 
   ~MacOSSemaphore() {
-    semaphore_destroy(mach_task_self(), semaphore_);
+    int r;
+    r = semaphore_destroy(mach_task_self(), semaphore_);
+    ASSERT(r == KERN_SUCCESS);
   }
 
-  // The MacOS mach semaphore documentation claims it does not have spurious
-  // wakeups, the way pthreads semaphores do.  So the code from the linux
-  // platform is not needed here.
-  void Wait() { semaphore_wait(semaphore_); }
+  void Wait() {
+    int r;
+    do {
+      r = semaphore_wait(semaphore_);
+      ASSERT(r == KERN_SUCCESS || r == KERN_ABORTED);
+    } while (r == KERN_ABORTED);
+  }
 
   bool Wait(int timeout);
 
@@ -753,8 +748,11 @@ class SamplerThread : public Thread {
       : Thread(Thread::Options("SamplerThread", kSamplerThreadStackSize)),
         interval_(interval) {}
 
+  static void SetUp() { if (!mutex_) mutex_ = OS::CreateMutex(); }
+  static void TearDown() { delete mutex_; }
+
   static void AddActiveSampler(Sampler* sampler) {
-    ScopedLock lock(mutex_.Pointer());
+    ScopedLock lock(mutex_);
     SamplerRegistry::AddActiveSampler(sampler);
     if (instance_ == NULL) {
       instance_ = new SamplerThread(sampler->interval());
@@ -765,7 +763,7 @@ class SamplerThread : public Thread {
   }
 
   static void RemoveActiveSampler(Sampler* sampler) {
-    ScopedLock lock(mutex_.Pointer());
+    ScopedLock lock(mutex_);
     SamplerRegistry::RemoveActiveSampler(sampler);
     if (SamplerRegistry::GetState() == SamplerRegistry::HAS_NO_SAMPLERS) {
       RuntimeProfiler::StopRuntimeProfilerThreadBeforeShutdown(instance_);
@@ -862,7 +860,7 @@ class SamplerThread : public Thread {
   RuntimeProfilerRateLimiter rate_limiter_;
 
   // Protects the process wide state below.
-  static LazyMutex mutex_;
+  static Mutex* mutex_;
   static SamplerThread* instance_;
 
  private:
@@ -872,8 +870,23 @@ class SamplerThread : public Thread {
 #undef REGISTER_FIELD
 
 
-LazyMutex SamplerThread::mutex_ = LAZY_MUTEX_INITIALIZER;
+Mutex* SamplerThread::mutex_ = NULL;
 SamplerThread* SamplerThread::instance_ = NULL;
+
+
+void OS::SetUp() {
+  // Seed the random number generator. We preserve microsecond resolution.
+  uint64_t seed = Ticks() ^ (getpid() << 16);
+  srandom(static_cast<unsigned int>(seed));
+  limit_mutex = CreateMutex();
+  SamplerThread::SetUp();
+}
+
+
+void OS::TearDown() {
+  SamplerThread::TearDown();
+  delete limit_mutex;
+}
 
 
 Sampler::Sampler(Isolate* isolate, int interval)

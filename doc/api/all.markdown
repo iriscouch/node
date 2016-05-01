@@ -1,7 +1,7 @@
 @include documentation
 @include synopsis
 @include globals
-@include stdio
+@include console
 @include timers
 @include modules
 @include addons
@@ -23,6 +23,7 @@
 @include https
 @include url
 @include querystring
+@include punycode
 @include readline
 @include repl
 @include vm
@@ -33,4 +34,3 @@
 @include os
 @include debugger
 @include cluster
-@include appendix_1

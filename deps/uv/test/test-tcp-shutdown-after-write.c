@@ -70,13 +70,18 @@ static void timer_cb(uv_timer_t* handle, int status) {
 }
 
 
-static void connect_cb(uv_connect_t* req, int status) {
-  ASSERT(status == 0);
-  connect_cb_called++;
+static void read_cb(uv_stream_t* handle, ssize_t nread, uv_buf_t buf) {
 }
 
 
-static void read_cb(uv_stream_t* handle, ssize_t nread, uv_buf_t buf) {
+static void connect_cb(uv_connect_t* req, int status) {
+  int r;
+
+  ASSERT(status == 0);
+  connect_cb_called++;
+
+  r = uv_read_start((uv_stream_t*)&conn, alloc_cb, read_cb);
+  ASSERT(r == 0);
 }
 
 
@@ -113,10 +118,7 @@ TEST_IMPL(tcp_shutdown_after_write) {
   r = uv_tcp_connect(&connect_req, &conn, addr, connect_cb);
   ASSERT(r == 0);
 
-  r = uv_read_start((uv_stream_t*)&conn, alloc_cb, read_cb);
-  ASSERT(r == 0);
-
-  r = uv_run(loop);
+  r = uv_run(loop, UV_RUN_DEFAULT);
   ASSERT(r == 0);
 
   ASSERT(connect_cb_called == 1);
@@ -125,5 +127,6 @@ TEST_IMPL(tcp_shutdown_after_write) {
   ASSERT(conn_close_cb_called == 1);
   ASSERT(timer_close_cb_called == 1);
 
+  MAKE_VALGRIND_HAPPY();
   return 0;
 }

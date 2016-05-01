@@ -7,9 +7,9 @@
 #define V8_ABBR_H
 
 /* Frame pointer offsets */
-#define V8_OFF_FP_FUNC              ((uint32_t)V8DBG_OFF_FP_FUNCTION)
-#define V8_OFF_FP_CONTEXT           ((uint32_t)V8DBG_OFF_FP_CONTEXT)
-#define V8_OFF_FP_MARKER            ((uint32_t)V8DBG_OFF_FP_MARKER)
+#define V8_OFF_FP_FUNC              V8DBG_OFF_FP_FUNCTION
+#define V8_OFF_FP_CONTEXT           V8DBG_OFF_FP_CONTEXT
+#define V8_OFF_FP_MARKER            V8DBG_OFF_FP_MARKER
 
 /* Stack frame types */
 #define V8_FT_ENTRY                 V8DBG_FRAMETYPE_ENTRYFRAME
@@ -22,9 +22,9 @@
 #define V8_FT_ADAPTOR               V8DBG_FRAMETYPE_ARGUMENTSADAPTORFRAME
 
 /* Identification masks and tags */
-#define V8_SmiTagMask               V8DBG_SMITAGMASK
-#define V8_SmiTag                   V8DBG_SMITAG
-#define V8_SmiValueShift            V8_SmiTagMask
+#define V8_SmiTagMask               (V8DBG_SMITAGMASK)
+#define V8_SmiTag                   (V8DBG_SMITAG)
+#define V8_SmiValueShift            (V8DBG_SMISHIFTSIZE + V8DBG_SMITAGMASK)
 
 #define V8_HeapObjectTagMask        V8DBG_HEAPOBJECTTAGMASK
 #define V8_HeapObjectTag            V8DBG_HEAPOBJECTTAG
@@ -43,9 +43,23 @@
 /* Instance types */
 #define V8_IT_FIXEDARRAY            V8DBG_TYPE_FIXEDARRAY__FIXED_ARRAY_TYPE
 #define V8_IT_CODE                  V8DBG_TYPE_CODE__CODE_TYPE
+#define V8_IT_SCRIPT                V8DBG_TYPE_SCRIPT__SCRIPT_TYPE
 
 /* Node-specific offsets */
-#define NODE_OFF_EXTSTR_DATA        0x4
+#define NODE_OFF_EXTSTR_DATA        sizeof(void*)
+
+/*
+ * Not all versions of V8 have the offset for the "chars" array in the
+ * SeqTwoByteString class, but it's the same as the one for SeqOneByteString,
+ * which used to be called SeqAsciiString.
+ */
+#ifndef V8DBG_CLASS_SEQTWOBYTESTRING__CHARS__CHAR
+#ifdef V8DBG_CLASS_SEQONEBYTESTRING__CHARS__CHAR
+#define	V8DBG_CLASS_SEQTWOBYTESTRING__CHARS__CHAR V8DBG_CLASS_SEQONEBYTESTRING__CHARS__CHAR
+#else
+#define	V8DBG_CLASS_SEQTWOBYTESTRING__CHARS__CHAR V8DBG_CLASS_SEQASCIISTRING__CHARS__CHAR
+#endif
+#endif
 
 /* Heap class->field offsets */
 #define V8_OFF_HEAP(off)            ((off) - 1)
@@ -82,5 +96,7 @@
     V8_OFF_HEAP(V8DBG_CLASS_HEAPOBJECT__MAP__MAP)
 #define V8_OFF_MAP_ATTRS  \
     V8_OFF_HEAP(V8DBG_CLASS_MAP__INSTANCE_ATTRIBUTES__INT)
+#define V8_OFF_TWOBYTESTR_CHARS  \
+    V8_OFF_HEAP(V8DBG_CLASS_SEQTWOBYTESTRING__CHARS__CHAR)
 
 #endif /* V8_ABBR_H */

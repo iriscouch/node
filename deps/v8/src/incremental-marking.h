@@ -1,4 +1,4 @@
-// Copyright 2011 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -53,6 +53,8 @@ class IncrementalMarking {
 
   explicit IncrementalMarking(Heap* heap);
 
+  static void Initialize();
+
   void TearDown();
 
   State state() {
@@ -93,21 +95,23 @@ class IncrementalMarking {
   // progress in the face of the mutator creating new work for it.  We start
   // of at a moderate rate of work and gradually increase the speed of the
   // incremental marker until it completes.
-  // Do some marking every time this much memory has been allocated.
+  // Do some marking every time this much memory has been allocated or that many
+  // heavy (color-checking) write barriers have been invoked.
   static const intptr_t kAllocatedThreshold = 65536;
+  static const intptr_t kWriteBarriersInvokedThreshold = 65536;
   // Start off by marking this many times more memory than has been allocated.
-  static const intptr_t kInitialAllocationMarkingFactor = 1;
+  static const intptr_t kInitialMarkingSpeed = 1;
   // But if we are promoting a lot of data we need to mark faster to keep up
   // with the data that is entering the old space through promotion.
   static const intptr_t kFastMarking = 3;
   // After this many steps we increase the marking/allocating factor.
-  static const intptr_t kAllocationMarkingFactorSpeedupInterval = 1024;
+  static const intptr_t kMarkingSpeedAccellerationInterval = 1024;
   // This is how much we increase the marking/allocating factor by.
-  static const intptr_t kAllocationMarkingFactorSpeedup = 2;
-  static const intptr_t kMaxAllocationMarkingFactor = 1000;
+  static const intptr_t kMarkingSpeedAccelleration = 2;
+  static const intptr_t kMaxMarkingSpeed = 1000;
 
   void OldSpaceStep(intptr_t allocated) {
-    Step(allocated * kFastMarking / kInitialAllocationMarkingFactor,
+    Step(allocated * kFastMarking / kInitialMarkingSpeed,
          GC_VIA_STACK_GUARD);
   }
 
@@ -130,6 +134,12 @@ class IncrementalMarking {
                                                Object** slot,
                                                Isolate* isolate);
 
+  // Record a slot for compaction.  Returns false for objects that are
+  // guaranteed to be rescanned or not guaranteed to survive.
+  //
+  // No slots in white objects should be recorded, as some slots are typed and
+  // cannot be interpreted correctly if the underlying object does not survive
+  // the incremental cycle (stays white).
   INLINE(bool BaseRecordWrite(HeapObject* obj, Object** slot, Object* value));
   INLINE(void RecordWrite(HeapObject* obj, Object** slot, Object* value));
   INLINE(void RecordWriteIntoCode(HeapObject* obj,
@@ -153,8 +163,6 @@ class IncrementalMarking {
   inline void BlackToGreyAndUnshift(HeapObject* obj, MarkBit mark_bit);
 
   inline void WhiteToGreyAndPush(HeapObject* obj, MarkBit mark_bit);
-
-  inline void WhiteToGrey(HeapObject* obj, MarkBit mark_bit);
 
   // Does white->black or keeps gray or black color. Returns true if converting
   // white to black.
@@ -205,12 +213,13 @@ class IncrementalMarking {
 
   void NotifyOfHighPromotionRate() {
     if (IsMarking()) {
-      if (allocation_marking_factor_ < kFastMarking) {
+      if (marking_speed_ < kFastMarking) {
         if (FLAG_trace_gc) {
-          PrintF("Increasing marking speed to %d due to high promotion rate\n",
-                 static_cast<int>(kFastMarking));
+          PrintPID("Increasing marking speed to %d "
+                   "due to high promotion rate\n",
+                   static_cast<int>(kFastMarking));
         }
-        allocation_marking_factor_ = kFastMarking;
+        marking_speed_ = kFastMarking;
       }
     }
   }
@@ -250,8 +259,6 @@ class IncrementalMarking {
 
   void EnsureMarkingDequeIsCommitted();
 
-  void VisitGlobalContext(Context* ctx, ObjectVisitor* v);
-
   Heap* heap_;
 
   State state_;
@@ -270,9 +277,10 @@ class IncrementalMarking {
   double steps_took_since_last_gc_;
   int64_t bytes_rescanned_;
   bool should_hurry_;
-  int allocation_marking_factor_;
+  int marking_speed_;
   intptr_t bytes_scanned_;
   intptr_t allocated_;
+  intptr_t write_barriers_invoked_since_last_step_;
 
   int no_marking_scope_depth_;
 

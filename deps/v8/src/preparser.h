@@ -150,11 +150,11 @@ class PreParser {
 
   // Parses a single function literal, from the opening parentheses before
   // parameters to the closing brace after the body.
-  // Returns a FunctionEntry describing the body of the funciton in enough
+  // Returns a FunctionEntry describing the body of the function in enough
   // detail that it can be lazily compiled.
   // The scanner is expected to have matched the "function" keyword and
   // parameters, and have consumed the initial '{'.
-  // At return, unless an error occured, the scanner is positioned before the
+  // At return, unless an error occurred, the scanner is positioned before the
   // the final '}'.
   PreParseResult PreParseLazyFunction(i::LanguageMode mode,
                                       i::ParserRecorder* log);
@@ -470,8 +470,19 @@ class PreParser {
     void set_language_mode(i::LanguageMode language_mode) {
       language_mode_ = language_mode;
     }
-    void EnterWith() { with_nesting_count_++; }
-    void LeaveWith() { with_nesting_count_--; }
+
+    class InsideWith {
+     public:
+      explicit InsideWith(Scope* scope) : scope_(scope) {
+        scope->with_nesting_count_++;
+      }
+
+      ~InsideWith() { scope_->with_nesting_count_--; }
+
+     private:
+      Scope* scope_;
+      DISALLOW_COPY_AND_ASSIGN(InsideWith);
+    };
 
    private:
     Scope** const variable_;

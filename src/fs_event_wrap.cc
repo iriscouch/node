@@ -21,6 +21,7 @@
 
 #include "node.h"
 #include "handle_wrap.h"
+#include "util.h"
 
 #include <stdlib.h>
 
@@ -51,7 +52,7 @@ private:
 
 FSEventWrap::FSEventWrap(Handle<Object> object): HandleWrap(object,
                                                     (uv_handle_t*)&handle_) {
-  handle_.data = reinterpret_cast<void*>(this);
+  handle_.data = static_cast<void*>(this);
   initialized_ = false;
 }
 
@@ -97,7 +98,7 @@ Handle<Value> FSEventWrap::Start(const Arguments& args) {
     return ThrowException(Exception::TypeError(String::New("Bad arguments")));
   }
 
-  String::Utf8Value path(args[0]);
+  node::Utf8Value path(args[0]);
 
   int r = uv_fs_event_init(uv_default_loop(), &wrap->handle_, *path, OnEvent, 0);
   if (r == 0) {
@@ -119,7 +120,7 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
   HandleScope scope;
   Local<String> eventStr;
 
-  FSEventWrap* wrap = reinterpret_cast<FSEventWrap*>(handle->data);
+  FSEventWrap* wrap = static_cast<FSEventWrap*>(handle->data);
 
   assert(wrap->object_.IsEmpty() == false);
 
@@ -152,7 +153,8 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
   Local<Value> argv[3] = {
     Integer::New(status),
     eventStr,
-    filename ? (Local<Value>)String::New(filename) : Local<Value>::New(v8::Null())
+    filename ? static_cast<Local<Value> >(String::New(filename))
+             : Local<Value>::New(v8::Null())
   };
 
   if (onchange_sym.IsEmpty()) {
@@ -166,12 +168,19 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
 Handle<Value> FSEventWrap::Close(const Arguments& args) {
   HandleScope scope;
 
-  UNWRAP(FSEventWrap)
+  // Unwrap manually here. The UNWRAP() macro asserts that wrap != NULL.
+  // That usually indicates an error but not here: double closes are possible
+  // and legal, HandleWrap::Close() deals with them the same way.
+  assert(!args.Holder().IsEmpty());
+  assert(args.Holder()->InternalFieldCount() > 0);
+  void* ptr = args.Holder()->GetPointerFromInternalField(0);
+  FSEventWrap* wrap = static_cast<FSEventWrap*>(ptr);
 
-  if (!wrap->initialized_)
+  if (wrap == NULL || wrap->initialized_ == false) {
     return Undefined();
-
+  }
   wrap->initialized_ = false;
+
   return HandleWrap::Close(args);
 }
 

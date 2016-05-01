@@ -50,7 +50,12 @@ function FormatString(format, message) {
         try {
           str = ToDetailString(args[arg_num]);
         } catch (e) {
-          str = "#<error>";
+          if (%IsJSModule(args[arg_num]))
+            str = "module";
+          else if (IS_SPEC_OBJECT(args[arg_num]))
+            str = "object";
+          else
+            str = "#<error>";
         }
       }
     }
@@ -61,18 +66,21 @@ function FormatString(format, message) {
 
 
 // To check if something is a native error we need to check the
-// concrete native error types. It is not enough to check "obj
-// instanceof $Error" because user code can replace
-// NativeError.prototype.__proto__. User code cannot replace
-// NativeError.prototype though and therefore this is a safe test.
+// concrete native error types. It is not sufficient to use instanceof
+// since it possible to create an object that has Error.prototype on
+// its prototype chain. This is the case for DOMException for example.
 function IsNativeErrorObject(obj) {
-  return (obj instanceof $Error) ||
-      (obj instanceof $EvalError) ||
-      (obj instanceof $RangeError) ||
-      (obj instanceof $ReferenceError) ||
-      (obj instanceof $SyntaxError) ||
-      (obj instanceof $TypeError) ||
-      (obj instanceof $URIError);
+  switch (%_ClassOf(obj)) {
+    case 'Error':
+    case 'EvalError':
+    case 'RangeError':
+    case 'ReferenceError':
+    case 'SyntaxError':
+    case 'TypeError':
+    case 'URIError':
+      return true;
+  }
+  return false;
 }
 
 
@@ -132,7 +140,7 @@ function FormatMessage(message) {
     var messagesDictionary = [
       // Error
       "cyclic_proto",                 ["Cyclic __proto__ value"],
-      "code_gen_from_strings",        ["Code generation from strings disallowed for this context"],
+      "code_gen_from_strings",        ["%0"],
       // TypeError
       "unexpected_token",             ["Unexpected token ", "%0"],
       "unexpected_token_number",      ["Unexpected number"],
@@ -194,6 +202,7 @@ function FormatMessage(message) {
       "proxy_non_object_prop_names",  ["Trap '", "%1", "' returned non-object ", "%0"],
       "proxy_repeated_prop_name",     ["Trap '", "%1", "' returned repeated property name '", "%2", "'"],
       "invalid_weakmap_key",          ["Invalid value used as weak map key"],
+      "not_date_object",              ["this is not a Date object."],
       // RangeError
       "invalid_array_length",         ["Invalid array length"],
       "stack_overflow",               ["Maximum call stack size exceeded"],
@@ -220,7 +229,7 @@ function FormatMessage(message) {
       "strict_catch_variable",        ["Catch variable may not be eval or arguments in strict mode"],
       "too_many_arguments",           ["Too many arguments in function call (only 32766 allowed)"],
       "too_many_parameters",          ["Too many parameters in function definition (only 32766 allowed)"],
-      "too_many_variables",           ["Too many variables declared (only 32767 allowed)"],
+      "too_many_variables",           ["Too many variables declared (only 131071 allowed)"],
       "strict_param_name",            ["Parameter name eval or arguments is not allowed in strict mode"],
       "strict_param_dupe",            ["Strict mode function may not have duplicate parameter names"],
       "strict_var_name",              ["Variable name may not be eval or arguments in strict mode"],
@@ -248,6 +257,7 @@ function FormatMessage(message) {
       "harmony_const_assign",         ["Assignment to constant variable."],
       "invalid_module_path",          ["Module does not export '", "%0", "', or export is not itself a module"],
       "module_type_error",            ["Module '", "%0", "' used improperly"],
+      "module_export_undefined",      ["Export '", "%0", "' is not defined in module"],
     ];
     var messages = { __proto__ : null };
     for (var i = 0; i < messagesDictionary.length; i += 2) {
@@ -522,8 +532,8 @@ function ScriptLineCount() {
 
 
 /**
- * Returns the name of script if available, contents of sourceURL comment
- * otherwise. See
+ * If sourceURL comment is available and script starts at zero returns sourceURL
+ * comment contents. Otherwise, script name is returned. See
  * http://fbug.googlecode.com/svn/branches/firebug1.1/docs/ReleaseNotes_1.1.txt
  * for details on using //@ sourceURL comment to identify scritps that don't
  * have name.
@@ -532,14 +542,15 @@ function ScriptLineCount() {
  * otherwise.
  */
 function ScriptNameOrSourceURL() {
-  if (this.name) {
+  if (this.line_offset > 0 || this.column_offset > 0) {
     return this.name;
   }
 
   // The result is cached as on long scripts it takes noticable time to search
   // for the sourceURL.
-  if (this.hasCachedNameOrSourceURL)
-      return this.cachedNameOrSourceURL;
+  if (this.hasCachedNameOrSourceURL) {
+    return this.cachedNameOrSourceURL;
+  }
   this.hasCachedNameOrSourceURL = true;
 
   // TODO(608): the spaces in a regexp below had to be escaped as \040
@@ -745,7 +756,7 @@ function GetPositionInLine(message) {
 
 
 function GetStackTraceLine(recv, fun, pos, isGlobal) {
-  return FormatSourcePosition(new CallSite(recv, fun, pos));
+  return new CallSite(recv, fun, pos).toString();
 }
 
 // ----------------------------------------------------------------------------
@@ -757,18 +768,18 @@ function DefineOneShotAccessor(obj, name, fun) {
   // Note that the accessors consistently operate on 'obj', not 'this'.
   // Since the object may occur in someone else's prototype chain we
   // can't rely on 'this' being the same as 'obj'.
-  var hasBeenSet = false;
   var value;
+  var value_factory = fun;
   var getter = function() {
-    if (hasBeenSet) {
+    if (value_factory == null) {
       return value;
     }
-    hasBeenSet = true;
-    value = fun(obj);
+    value = value_factory(obj);
+    value_factory = null;
     return value;
   };
   var setter = function(v) {
-    hasBeenSet = true;
+    value_factory = null;
     value = v;
   };
   %DefineOrRedefineAccessorProperty(obj, name, getter, setter, DONT_ENUM);
@@ -785,15 +796,7 @@ function CallSiteGetThis() {
 }
 
 function CallSiteGetTypeName() {
-  var constructor = this.receiver.constructor;
-  if (!constructor) {
-    return %_CallFunction(this.receiver, ObjectToString);
-  }
-  var constructorName = constructor.name;
-  if (!constructorName) {
-    return %_CallFunction(this.receiver, ObjectToString);
-  }
-  return constructorName;
+  return GetTypeName(this, false);
 }
 
 function CallSiteIsToplevel() {
@@ -827,8 +830,10 @@ function CallSiteGetFunctionName() {
   var name = this.fun.name;
   if (name) {
     return name;
-  } else {
-    return %FunctionGetInferredName(this.fun);
+  }
+  name = %FunctionGetInferredName(this.fun);
+  if (name) {
+    return name;
   }
   // Maybe this is an evaluation?
   var script = %FunctionGetScript(this.fun);
@@ -856,9 +861,9 @@ function CallSiteGetMethodName() {
   }
   var name = null;
   for (var prop in this.receiver) {
-    if (this.receiver.__lookupGetter__(prop) === this.fun ||
-        this.receiver.__lookupSetter__(prop) === this.fun ||
-        (!this.receiver.__lookupGetter__(prop) &&
+    if (%_CallFunction(this.receiver, prop, ObjectLookupGetter) === this.fun ||
+        %_CallFunction(this.receiver, prop, ObjectLookupSetter) === this.fun ||
+        (!%_CallFunction(this.receiver, prop, ObjectLookupGetter) &&
          this.receiver[prop] === this.fun)) {
       // If we find more than one match bail out to avoid confusion.
       if (name) {
@@ -919,6 +924,74 @@ function CallSiteIsConstructor() {
   return this.fun === constructor;
 }
 
+function CallSiteToString() {
+  var fileName;
+  var fileLocation = "";
+  if (this.isNative()) {
+    fileLocation = "native";
+  } else {
+    if (this.isEval()) {
+      fileName = this.getScriptNameOrSourceURL();
+      if (!fileName) {
+        fileLocation = this.getEvalOrigin();
+        fileLocation += ", ";  // Expecting source position to follow.
+      }
+    } else {
+      fileName = this.getFileName();
+    }
+
+    if (fileName) {
+      fileLocation += fileName;
+    } else {
+      // Source code does not originate from a file and is not native, but we
+      // can still get the source position inside the source string, e.g. in
+      // an eval string.
+      fileLocation += "<anonymous>";
+    }
+    var lineNumber = this.getLineNumber();
+    if (lineNumber != null) {
+      fileLocation += ":" + lineNumber;
+      var columnNumber = this.getColumnNumber();
+      if (columnNumber) {
+        fileLocation += ":" + columnNumber;
+      }
+    }
+  }
+
+  var line = "";
+  var functionName = this.getFunctionName();
+  var addSuffix = true;
+  var isConstructor = this.isConstructor();
+  var isMethodCall = !(this.isToplevel() || isConstructor);
+  if (isMethodCall) {
+    var typeName = GetTypeName(this, true);
+    var methodName = this.getMethodName();
+    if (functionName) {
+      if (typeName && functionName.indexOf(typeName) != 0) {
+        line += typeName + ".";
+      }
+      line += functionName;
+      if (methodName && functionName.lastIndexOf("." + methodName) !=
+          functionName.length - methodName.length - 1) {
+        line += " [as " + methodName + "]";
+      }
+    } else {
+      line += typeName + "." + (methodName || "<anonymous>");
+    }
+  } else if (isConstructor) {
+    line += "new " + (functionName || "<anonymous>");
+  } else if (functionName) {
+    line += functionName;
+  } else {
+    line += fileLocation;
+    addSuffix = false;
+  }
+  if (addSuffix) {
+    line += " (" + fileLocation + ")";
+  }
+  return line;
+}
+
 SetUpLockedPrototype(CallSite, $Array("receiver", "fun", "pos"), $Array(
   "getThis", CallSiteGetThis,
   "getTypeName", CallSiteGetTypeName,
@@ -934,7 +1007,8 @@ SetUpLockedPrototype(CallSite, $Array("receiver", "fun", "pos"), $Array(
   "getColumnNumber", CallSiteGetColumnNumber,
   "isNative", CallSiteIsNative,
   "getPosition", CallSiteGetPosition,
-  "isConstructor", CallSiteIsConstructor
+  "isConstructor", CallSiteIsConstructor,
+  "toString", CallSiteToString
 ));
 
 
@@ -976,65 +1050,6 @@ function FormatEvalOrigin(script) {
   return eval_origin;
 }
 
-function FormatSourcePosition(frame) {
-  var fileName;
-  var fileLocation = "";
-  if (frame.isNative()) {
-    fileLocation = "native";
-  } else if (frame.isEval()) {
-    fileName = frame.getScriptNameOrSourceURL();
-    if (!fileName) {
-      fileLocation = frame.getEvalOrigin();
-    }
-  } else {
-    fileName = frame.getFileName();
-  }
-
-  if (fileName) {
-    fileLocation += fileName;
-    var lineNumber = frame.getLineNumber();
-    if (lineNumber != null) {
-      fileLocation += ":" + lineNumber;
-      var columnNumber = frame.getColumnNumber();
-      if (columnNumber) {
-        fileLocation += ":" + columnNumber;
-      }
-    }
-  }
-
-  if (!fileLocation) {
-    fileLocation = "unknown source";
-  }
-  var line = "";
-  var functionName = frame.getFunction().name;
-  var addPrefix = true;
-  var isConstructor = frame.isConstructor();
-  var isMethodCall = !(frame.isToplevel() || isConstructor);
-  if (isMethodCall) {
-    var methodName = frame.getMethodName();
-    line += frame.getTypeName() + ".";
-    if (functionName) {
-      line += functionName;
-      if (methodName && (methodName != functionName)) {
-        line += " [as " + methodName + "]";
-      }
-    } else {
-      line += methodName || "<anonymous>";
-    }
-  } else if (isConstructor) {
-    line += "new " + (functionName || "<anonymous>");
-  } else if (functionName) {
-    line += functionName;
-  } else {
-    line += fileLocation;
-    addPrefix = false;
-  }
-  if (addPrefix) {
-    line += " (" + fileLocation + ")";
-  }
-  return line;
-}
-
 function FormatStackTrace(error, frames) {
   var lines = [];
   try {
@@ -1050,7 +1065,7 @@ function FormatStackTrace(error, frames) {
     var frame = frames[i];
     var line;
     try {
-      line = FormatSourcePosition(frame);
+      line = frame.toString();
     } catch (e) {
       try {
         line = "<error: " + e + ">";
@@ -1081,6 +1096,19 @@ function FormatRawStackTrace(error, raw_stack) {
   }
 }
 
+function GetTypeName(obj, requireConstructor) {
+  var constructor = obj.receiver.constructor;
+  if (!constructor) {
+    return requireConstructor ? null :
+        %_CallFunction(obj.receiver, ObjectToString);
+  }
+  var constructorName = constructor.name;
+  if (!constructorName) {
+    return requireConstructor ? null :
+        %_CallFunction(obj.receiver, ObjectToString);
+  }
+  return constructorName;
+}
 
 function captureStackTrace(obj, cons_opt) {
   var stackTraceLimit = $Error.stackTraceLimit;
@@ -1125,13 +1153,7 @@ function SetUpError() {
     }
     %FunctionSetInstanceClassName(f, 'Error');
     %SetProperty(f.prototype, 'constructor', f, DONT_ENUM);
-    // The name property on the prototype of error objects is not
-    // specified as being read-one and dont-delete. However, allowing
-    // overwriting allows leaks of error objects between script blocks
-    // in the same context in a browser setting. Therefore we fix the
-    // name.
-    %SetProperty(f.prototype, "name", name,
-                 DONT_ENUM | DONT_DELETE | READ_ONLY)  ;
+    %SetProperty(f.prototype, "name", name, DONT_ENUM);
     %SetCode(f, function(m) {
       if (%_IsConstructCall()) {
         // Define all the expected properties directly on the error
@@ -1147,10 +1169,8 @@ function SetUpError() {
               return FormatMessage(%NewMessageObject(obj.type, obj.arguments));
           });
         } else if (!IS_UNDEFINED(m)) {
-          %IgnoreAttributesAndSetProperty(this,
-                                          'message',
-                                          ToString(m),
-                                          DONT_ENUM);
+          %IgnoreAttributesAndSetProperty(
+            this, 'message', ToString(m), DONT_ENUM);
         }
         captureStackTrace(this, f);
       } else {
@@ -1180,16 +1200,41 @@ $Error.captureStackTrace = captureStackTrace;
 var visited_errors = new InternalArray();
 var cyclic_error_marker = new $Object();
 
+function GetPropertyWithoutInvokingMonkeyGetters(error, name) {
+  // Climb the prototype chain until we find the holder.
+  while (error && !%HasLocalProperty(error, name)) {
+    error = error.__proto__;
+  }
+  if (error === null) return void 0;
+  if (!IS_OBJECT(error)) return error[name];
+  // If the property is an accessor on one of the predefined errors that can be
+  // generated statically by the compiler, don't touch it. This is to address
+  // http://code.google.com/p/chromium/issues/detail?id=69187
+  var desc = %GetOwnProperty(error, name);
+  if (desc && desc[IS_ACCESSOR_INDEX]) {
+    var isName = name === "name";
+    if (error === $ReferenceError.prototype)
+      return isName ? "ReferenceError" : void 0;
+    if (error === $SyntaxError.prototype)
+      return isName ? "SyntaxError" : void 0;
+    if (error === $TypeError.prototype)
+      return isName ? "TypeError" : void 0;
+  }
+  // Otherwise, read normally.
+  return error[name];
+}
+
 function ErrorToStringDetectCycle(error) {
   if (!%PushIfAbsent(visited_errors, error)) throw cyclic_error_marker;
   try {
-    var type = error.type;
-    var name = error.name;
+    var type = GetPropertyWithoutInvokingMonkeyGetters(error, "type");
+    var name = GetPropertyWithoutInvokingMonkeyGetters(error, "name");
     name = IS_UNDEFINED(name) ? "Error" : TO_STRING_INLINE(name);
-    var message = error.message;
+    var message = GetPropertyWithoutInvokingMonkeyGetters(error, "message");
     var hasMessage = %_CallFunction(error, "message", ObjectHasOwnProperty);
     if (type && !hasMessage) {
-      message = FormatMessage(%NewMessageObject(type, error.arguments));
+      var args = GetPropertyWithoutInvokingMonkeyGetters(error, "arguments");
+      message = FormatMessage(%NewMessageObject(type, args));
     }
     message = IS_UNDEFINED(message) ? "" : TO_STRING_INLINE(message);
     if (name === "") return message;

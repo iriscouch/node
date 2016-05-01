@@ -442,7 +442,7 @@ ScriptBreakPoint.prototype.set = function (script) {
   if (position === null) return;
 
   // Create a break point object and set the break point.
-  break_point = MakeBreakPoint(position, this);
+  var break_point = MakeBreakPoint(position, this);
   break_point.setIgnoreCount(this.ignoreCount());
   var actual_position = %SetScriptBreakPoint(script, position, break_point);
   if (IS_UNDEFINED(actual_position)) {
@@ -1427,6 +1427,8 @@ DebugCommandProcessor.prototype.processDebugJSONRequest = function(
         this.scopesRequest_(request, response);
       } else if (request.command == 'scope') {
         this.scopeRequest_(request, response);
+      } else if (request.command == 'setVariableValue') {
+        this.setVariableValueRequest_(request, response);
       } else if (request.command == 'evaluate') {
         this.evaluateRequest_(request, response);
       } else if (lol_is_enabled && request.command == 'getobj') {
@@ -1449,6 +1451,8 @@ DebugCommandProcessor.prototype.processDebugJSONRequest = function(
         this.profileRequest_(request, response);
       } else if (request.command == 'changelive') {
         this.changeLiveRequest_(request, response);
+      } else if (request.command == 'restartframe') {
+        this.restartFrameRequest_(request, response);
       } else if (request.command == 'flags') {
         this.debuggerFlagsRequest_(request, response);
       } else if (request.command == 'v8flags') {
@@ -1951,13 +1955,14 @@ DebugCommandProcessor.prototype.frameRequest_ = function(request, response) {
 };
 
 
-DebugCommandProcessor.prototype.frameForScopeRequest_ = function(request) {
+DebugCommandProcessor.prototype.resolveFrameFromScopeDescription_ =
+    function(scope_description) {
   // Get the frame for which the scope or scopes are requested.
   // With no frameNumber argument use the currently selected frame.
-  if (request.arguments && !IS_UNDEFINED(request.arguments.frameNumber)) {
-    frame_index = request.arguments.frameNumber;
+  if (scope_description && !IS_UNDEFINED(scope_description.frameNumber)) {
+    frame_index = scope_description.frameNumber;
     if (frame_index < 0 || this.exec_state_.frameCount() <= frame_index) {
-      return response.failed('Invalid frame number');
+      throw new Error('Invalid frame number');
     }
     return this.exec_state_.frame(frame_index);
   } else {
@@ -1966,20 +1971,44 @@ DebugCommandProcessor.prototype.frameForScopeRequest_ = function(request) {
 };
 
 
-DebugCommandProcessor.prototype.scopesRequest_ = function(request, response) {
-  // No frames no scopes.
-  if (this.exec_state_.frameCount() == 0) {
-    return response.failed('No scopes');
+// Gets scope host object from request. It is either a function
+// ('functionHandle' argument must be specified) or a stack frame
+// ('frameNumber' may be specified and the current frame is taken by default).
+DebugCommandProcessor.prototype.resolveScopeHolder_ =
+    function(scope_description) {
+  if (scope_description && "functionHandle" in scope_description) {
+    if (!IS_NUMBER(scope_description.functionHandle)) {
+      throw new Error('Function handle must be a number');
+    }
+    var function_mirror = LookupMirror(scope_description.functionHandle);
+    if (!function_mirror) {
+      throw new Error('Failed to find function object by handle');
+    }
+    if (!function_mirror.isFunction()) {
+      throw new Error('Value of non-function type is found by handle');
+    }
+    return function_mirror;
+  } else {
+    // No frames no scopes.
+    if (this.exec_state_.frameCount() == 0) {
+      throw new Error('No scopes');
+    }
+
+    // Get the frame for which the scopes are requested.
+    var frame = this.resolveFrameFromScopeDescription_(scope_description);
+    return frame;
   }
+}
 
-  // Get the frame for which the scopes are requested.
-  var frame = this.frameForScopeRequest_(request);
 
-  // Fill all scopes for this frame.
-  var total_scopes = frame.scopeCount();
+DebugCommandProcessor.prototype.scopesRequest_ = function(request, response) {
+  var scope_holder = this.resolveScopeHolder_(request.arguments);
+
+  // Fill all scopes for this frame or function.
+  var total_scopes = scope_holder.scopeCount();
   var scopes = [];
   for (var i = 0; i < total_scopes; i++) {
-    scopes.push(frame.scope(i));
+    scopes.push(scope_holder.scope(i));
   }
   response.body = {
     fromScope: 0,
@@ -1991,24 +2020,90 @@ DebugCommandProcessor.prototype.scopesRequest_ = function(request, response) {
 
 
 DebugCommandProcessor.prototype.scopeRequest_ = function(request, response) {
-  // No frames no scopes.
-  if (this.exec_state_.frameCount() == 0) {
-    return response.failed('No scopes');
-  }
-
-  // Get the frame for which the scope is requested.
-  var frame = this.frameForScopeRequest_(request);
+  // Get the frame or function for which the scope is requested.
+  var scope_holder = this.resolveScopeHolder_(request.arguments);
 
   // With no scope argument just return top scope.
   var scope_index = 0;
   if (request.arguments && !IS_UNDEFINED(request.arguments.number)) {
     scope_index = %ToNumber(request.arguments.number);
-    if (scope_index < 0 || frame.scopeCount() <= scope_index) {
+    if (scope_index < 0 || scope_holder.scopeCount() <= scope_index) {
       return response.failed('Invalid scope number');
     }
   }
 
-  response.body = frame.scope(scope_index);
+  response.body = scope_holder.scope(scope_index);
+};
+
+
+// Reads value from protocol description. Description may be in form of type
+// (for singletons), raw value (primitive types supported in JSON),
+// string value description plus type (for primitive values) or handle id.
+// Returns raw value or throws exception.
+DebugCommandProcessor.resolveValue_ = function(value_description) {
+  if ("handle" in value_description) {
+    var value_mirror = LookupMirror(value_description.handle);
+    if (!value_mirror) {
+      throw new Error("Failed to resolve value by handle, ' #" +
+          mapping.handle + "# not found");
+    }
+    return value_mirror.value();
+  } else if ("stringDescription" in value_description) {
+    if (value_description.type == BOOLEAN_TYPE) {
+      return Boolean(value_description.stringDescription);
+    } else if (value_description.type == NUMBER_TYPE) {
+      return Number(value_description.stringDescription);
+    } if (value_description.type == STRING_TYPE) {
+      return String(value_description.stringDescription);
+    } else {
+      throw new Error("Unknown type");
+    }
+  } else if ("value" in value_description) {
+    return value_description.value;
+  } else if (value_description.type == UNDEFINED_TYPE) {
+    return void 0;
+  } else if (value_description.type == NULL_TYPE) {
+    return null;
+  } else {
+    throw new Error("Failed to parse value description");
+  }
+};
+
+
+DebugCommandProcessor.prototype.setVariableValueRequest_ =
+    function(request, response) {
+  if (!request.arguments) {
+    response.failed('Missing arguments');
+    return;
+  }
+
+  if (IS_UNDEFINED(request.arguments.name)) {
+    response.failed('Missing variable name');
+  }
+  var variable_name = request.arguments.name;
+
+  var scope_description = request.arguments.scope;
+
+  // Get the frame or function for which the scope is requested.
+  var scope_holder = this.resolveScopeHolder_(scope_description);
+
+  if (IS_UNDEFINED(scope_description.number)) {
+    response.failed('Missing scope number');
+  }
+  var scope_index = %ToNumber(scope_description.number);
+
+  var scope = scope_holder.scope(scope_index);
+
+  var new_value =
+      DebugCommandProcessor.resolveValue_(request.arguments.newValue);
+
+  scope.setVariableValue(variable_name, new_value);
+
+  var new_value_mirror = MakeMirror(new_value);
+
+  response.body = {
+    newValue: new_value_mirror
+  };
 };
 
 
@@ -2057,7 +2152,7 @@ DebugCommandProcessor.prototype.evaluateRequest_ = function(request, response) {
 
   // Global evaluate.
   if (global) {
-    // Evaluate in the global context.
+    // Evaluate in the native context.
     response.body = this.exec_state_.evaluateGlobal(
         expression, Boolean(disable_break), additional_context_object);
     return;
@@ -2339,9 +2434,6 @@ DebugCommandProcessor.prototype.profileRequest_ = function(request, response) {
 
 DebugCommandProcessor.prototype.changeLiveRequest_ = function(
     request, response) {
-  if (!Debug.LiveEdit) {
-    return response.failed('LiveEdit feature is not supported');
-  }
   if (!request.arguments) {
     return response.failed('Missing arguments');
   }
@@ -2376,6 +2468,37 @@ DebugCommandProcessor.prototype.changeLiveRequest_ = function(
   if (!preview_only && !this.running_ && result_description.stack_modified) {
     response.body.stepin_recommended = true;
   }
+};
+
+
+DebugCommandProcessor.prototype.restartFrameRequest_ = function(
+    request, response) {
+  if (!request.arguments) {
+    return response.failed('Missing arguments');
+  }
+  var frame = request.arguments.frame;
+
+  // No frames to evaluate in frame.
+  if (this.exec_state_.frameCount() == 0) {
+    return response.failed('No frames');
+  }
+
+  var frame_mirror;
+  // Check whether a frame was specified.
+  if (!IS_UNDEFINED(frame)) {
+    var frame_number = %ToNumber(frame);
+    if (frame_number < 0 || frame_number >= this.exec_state_.frameCount()) {
+      return response.failed('Invalid frame "' + frame + '"');
+    }
+    // Restart specified frame.
+    frame_mirror = this.exec_state_.frame(frame_number);
+  } else {
+    // Restart selected frame.
+    frame_mirror = this.exec_state_.frame();
+  }
+
+  var result_description = Debug.LiveEdit.RestartFrame(frame_mirror);
+  response.body = {result: result_description};
 };
 
 
@@ -2614,3 +2737,7 @@ function ValueToProtocolValue_(value, mirror_serializer) {
   }
   return json;
 }
+
+Debug.TestApi = {
+  CommandProcessorResolveValue: DebugCommandProcessor.resolveValue_
+};

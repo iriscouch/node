@@ -29,6 +29,7 @@
 
 #include "log-utils.h"
 #include "string-stream.h"
+#include "version.h"
 
 namespace v8 {
 namespace internal {
@@ -105,6 +106,10 @@ void Log::Initialize() {
                 // one character so we can escape the loop properly.
                 p--;
                 break;
+              case 'p':
+                // %p expands to the process ID.
+                stream.Add("%d", OS::GetCurrentProcessId());
+                break;
               case 't': {
                 // %t expands to the current time in milliseconds.
                 double time = OS::TimeCurrentMillis();
@@ -131,6 +136,14 @@ void Log::Initialize() {
         OpenFile(FLAG_logfile);
       }
     }
+  }
+
+  if (output_handle_ != NULL) {
+    LogMessageBuilder msg(logger_);
+    msg.Append("v8-version,%d,%d,%d,%d,%d\n", Version::GetMajor(),
+               Version::GetMinor(), Version::GetBuild(), Version::GetPatch(),
+               Version::IsCandidate());
+    msg.WriteToLogFile();
   }
 }
 

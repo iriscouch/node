@@ -1,4 +1,4 @@
-// Copyright 2011 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -92,6 +92,33 @@ void OS::Guard(void* address, const size_t size) {
 }
 #endif  // __CYGWIN__
 
+// For our illumos/Solaris mmap hint, we pick a random address in the bottom
+// half of the top half of the address space (that is, the third quarter).
+// Because we do not MAP_FIXED, this will be treated only as a hint -- the
+// system will not fail to mmap() because something else happens to already be
+// mapped at our random address. We deliberately set the hint high enough to
+// get well above the system's break (that is, the heap); illumos and Solaris
+// will try the hint and if that fails allocate as if there were no hint at
+// all. The high hint prevents the break from getting hemmed in at low values,
+// ceding half of the address space to the system heap.
+
+// On all other 32bit platforms the range 0x20000000 - 0x60000000 is relatively
+// unpopulated across a variety of ASLR modes (PAE kernel, NX compat mode, etc)
+// and on macos 10.6 and 10.7.
+
+#ifdef V8_TARGET_ARCH_X64
+# ifdef __sun
+#   define V8_ASLR_MEMORY_SHIFT 0x400000000000ULL
+# else
+#   define V8_ASLR_MEMORY_SHIFT 0
+# endif // __sun
+#else
+# ifdef __sun
+#   define V8_ASLR_MEMORY_SHIFT 0x80000000
+# else
+#   define V8_ASLR_MEMORY_SHIFT 0x20000000
+# endif // __sun
+#endif // V8_TARGET_ARCH_X64
 
 void* OS::GetRandomMmapAddr() {
   Isolate* isolate = Isolate::UncheckedCurrent();
@@ -109,12 +136,10 @@ void* OS::GetRandomMmapAddr() {
     raw_addr &= V8_UINT64_C(0x3ffffffff000);
 #else
     uint32_t raw_addr = V8::RandomPrivate(isolate);
-    // The range 0x20000000 - 0x60000000 is relatively unpopulated across a
-    // variety of ASLR modes (PAE kernel, NX compat mode, etc) and on macos
-    // 10.6 and 10.7.
+
     raw_addr &= 0x3ffff000;
-    raw_addr += 0x20000000;
 #endif
+    raw_addr += V8_ASLR_MEMORY_SHIFT;
     return reinterpret_cast<void*>(raw_addr);
   }
   return NULL;
@@ -147,18 +172,14 @@ UNARY_MATH_FUNCTION(sqrt, CreateSqrtFunction())
 #undef MATH_FUNCTION
 
 
-void MathSetup() {
-  init_fast_sin_function();
-  init_fast_cos_function();
-  init_fast_tan_function();
-  init_fast_log_function();
-  init_fast_sqrt_function();
-}
-
-
 double OS::nan_value() {
   // NAN from math.h is defined in C99 and not in POSIX.
   return NAN;
+}
+
+
+int OS::GetCurrentProcessId() {
+  return static_cast<int>(getpid());
 }
 
 
@@ -177,19 +198,37 @@ int OS::GetUserTime(uint32_t* secs,  uint32_t* usecs) {
 
 
 double OS::TimeCurrentMillis() {
-  struct timeval tv;
-  if (gettimeofday(&tv, NULL) < 0) return 0.0;
-  return (static_cast<double>(tv.tv_sec) * 1000) +
-         (static_cast<double>(tv.tv_usec) / 1000);
+  return static_cast<double>(Ticks()) / 1000;
 }
 
 
 int64_t OS::Ticks() {
+#if defined(__linux__)
+  static clockid_t clock_id = static_cast<clockid_t>(-1);
+  struct timespec spec;
+  if (clock_id == static_cast<clockid_t>(-1)) {
+    // CLOCK_REALTIME_COARSE may not be defined by the system headers but
+    // might still be supported by the kernel so use the clock id directly.
+    // Only use CLOCK_REALTIME_COARSE when its granularity <= 1 ms.
+    const clockid_t clock_realtime_coarse = 5;
+    if (clock_getres(clock_realtime_coarse, &spec) == 0 &&
+        spec.tv_nsec <= 1000 * 1000) {
+      clock_id = clock_realtime_coarse;
+    } else {
+      clock_id = CLOCK_REALTIME;
+    }
+  }
+  if (clock_gettime(clock_id, &spec) != 0) {
+    return 0;  // Not really possible.
+  }
+  return static_cast<int64_t>(spec.tv_sec) * 1000000 + (spec.tv_nsec / 1000);
+#else
   // gettimeofday has microsecond resolution.
   struct timeval tv;
   if (gettimeofday(&tv, NULL) < 0)
     return 0;
   return (static_cast<int64_t>(tv.tv_sec) * 1000000) + tv.tv_usec;
+#endif
 }
 
 
@@ -313,20 +352,11 @@ int OS::VSNPrintF(Vector<char> str,
 
 #if defined(V8_TARGET_ARCH_IA32)
 static OS::MemCopyFunction memcopy_function = NULL;
-static LazyMutex memcopy_function_mutex = LAZY_MUTEX_INITIALIZER;
 // Defined in codegen-ia32.cc.
 OS::MemCopyFunction CreateMemCopyFunction();
 
 // Copy memory area to disjoint memory area.
 void OS::MemCopy(void* dest, const void* src, size_t size) {
-  if (memcopy_function == NULL) {
-    ScopedLock lock(memcopy_function_mutex.Pointer());
-    if (memcopy_function == NULL) {
-      OS::MemCopyFunction temp = CreateMemCopyFunction();
-      MemoryBarrier();
-      memcopy_function = temp;
-    }
-  }
   // Note: here we rely on dependent reads being ordered. This is true
   // on all architectures we currently support.
   (*memcopy_function)(dest, src, size);
@@ -335,6 +365,18 @@ void OS::MemCopy(void* dest, const void* src, size_t size) {
 #endif
 }
 #endif  // V8_TARGET_ARCH_IA32
+
+
+void POSIXPostSetUp() {
+#if defined(V8_TARGET_ARCH_IA32)
+  memcopy_function = CreateMemCopyFunction();
+#endif
+  init_fast_sin_function();
+  init_fast_cos_function();
+  init_fast_tan_function();
+  init_fast_log_function();
+  init_fast_sqrt_function();
+}
 
 // ----------------------------------------------------------------------------
 // POSIX string support.
@@ -347,6 +389,12 @@ char* OS::StrChr(char* str, int c) {
 
 void OS::StrNCpy(Vector<char> dest, const char* src, size_t n) {
   strncpy(dest.start(), src, n);
+}
+
+
+void Thread::YieldCPU() {
+  const timespec delay = { 0, 1 };
+  nanosleep(&delay, NULL);
 }
 
 
@@ -427,7 +475,11 @@ Socket* POSIXSocket::Accept() const {
     return NULL;
   }
 
-  int socket = accept(socket_, NULL, NULL);
+  int socket;
+  do {
+    socket = accept(socket_, NULL, NULL);
+  } while (socket == -1 && errno == EINTR);
+
   if (socket == -1) {
     return NULL;
   } else {
@@ -454,7 +506,9 @@ bool POSIXSocket::Connect(const char* host, const char* port) {
   }
 
   // Connect.
-  status = connect(socket_, result->ai_addr, result->ai_addrlen);
+  do {
+    status = connect(socket_, result->ai_addr, result->ai_addrlen);
+  } while (status == -1 && errno == EINTR);
   freeaddrinfo(result);
   return status == 0;
 }
@@ -473,14 +527,29 @@ bool POSIXSocket::Shutdown() {
 
 
 int POSIXSocket::Send(const char* data, int len) const {
-  int status = send(socket_, data, len, 0);
-  return status;
+  if (len <= 0) return 0;
+  int written = 0;
+  while (written < len) {
+    int status = send(socket_, data + written, len - written, 0);
+    if (status == 0) {
+      break;
+    } else if (status > 0) {
+      written += status;
+    } else if (errno != EINTR) {
+      return 0;
+    }
+  }
+  return written;
 }
 
 
 int POSIXSocket::Receive(char* data, int len) const {
-  int status = recv(socket_, data, len, 0);
-  return status;
+  if (len <= 0) return 0;
+  int status;
+  do {
+    status = recv(socket_, data, len, 0);
+  } while (status == -1 && errno == EINTR);
+  return (status < 0) ? 0 : status;
 }
 
 

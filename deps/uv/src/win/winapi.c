@@ -25,11 +25,15 @@
 #include "internal.h"
 
 
+/* Ntdll function pointers */
 sRtlNtStatusToDosError pRtlNtStatusToDosError;
 sNtDeviceIoControlFile pNtDeviceIoControlFile;
 sNtQueryInformationFile pNtQueryInformationFile;
 sNtSetInformationFile pNtSetInformationFile;
 sNtQuerySystemInformation pNtQuerySystemInformation;
+
+
+/* Kernel32 function pointers */
 sGetQueuedCompletionStatusEx pGetQueuedCompletionStatusEx;
 sSetFileCompletionNotificationModes pSetFileCompletionNotificationModes;
 sCreateSymbolicLinkW pCreateSymbolicLinkW;
@@ -41,6 +45,11 @@ sTryAcquireSRWLockShared pTryAcquireSRWLockShared;
 sTryAcquireSRWLockExclusive pTryAcquireSRWLockExclusive;
 sReleaseSRWLockShared pReleaseSRWLockShared;
 sReleaseSRWLockExclusive pReleaseSRWLockExclusive;
+sInitializeConditionVariable pInitializeConditionVariable;
+sSleepConditionVariableCS pSleepConditionVariableCS;
+sSleepConditionVariableSRW pSleepConditionVariableSRW;
+sWakeAllConditionVariable pWakeAllConditionVariable;
+sWakeConditionVariable pWakeConditionVariable;
 
 
 void uv_winapi_init() {
@@ -125,4 +134,19 @@ void uv_winapi_init() {
 
   pReleaseSRWLockExclusive = (sReleaseSRWLockExclusive)
     GetProcAddress(kernel32_module, "ReleaseSRWLockExclusive");
+
+  pInitializeConditionVariable = (sInitializeConditionVariable)
+    GetProcAddress(kernel32_module, "InitializeConditionVariable");
+
+  pSleepConditionVariableCS = (sSleepConditionVariableCS)
+    GetProcAddress(kernel32_module, "SleepConditionVariableCS");
+
+  pSleepConditionVariableSRW = (sSleepConditionVariableSRW)
+    GetProcAddress(kernel32_module, "SleepConditionVariableSRW");
+
+  pWakeAllConditionVariable = (sWakeAllConditionVariable)
+    GetProcAddress(kernel32_module, "WakeAllConditionVariable");
+
+  pWakeConditionVariable = (sWakeConditionVariable)
+    GetProcAddress(kernel32_module, "WakeConditionVariable");
 }

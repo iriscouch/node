@@ -1,12 +1,12 @@
 
 module.exports = unpublish
 
-var registry = require("./utils/npm-registry-client/index.js")
-  , log = require("./utils/log.js")
+var url = require("url")
+  , log = require("npmlog")
   , npm = require("./npm.js")
-  , readJson = require("./utils/read-json.js")
+  , registry = npm.registry
+  , readJson = require("read-package-json")
   , path = require("path")
-  , output = require("./utils/output.js")
 
 unpublish.usage = "npm unpublish <project>[@<version>]"
 
@@ -14,7 +14,8 @@ unpublish.completion = function (opts, cb) {
   if (opts.conf.argv.remain.length >= 3) return cb()
   var un = encodeURIComponent(npm.config.get("username"))
   if (!un) return cb()
-  registry.get("/-/by-user/"+un, function (er, pkgs) {
+  var uri = url.resolve(npm.config.get("registry"), "-/by-user/"+un)
+  registry.get(uri, null, function (er, pkgs) {
     // do a bit of filtering at this point, so that we don't need
     // to fetch versions for more than one thing, but also don't
     // accidentally a whole project.
@@ -22,12 +23,12 @@ unpublish.completion = function (opts, cb) {
     if (!pkgs || !pkgs.length) return cb()
     var partial = opts.partialWord.split("@")
       , pp = partial.shift()
-      , pv = partial.join("@")
     pkgs = pkgs.filter(function (p) {
       return p.indexOf(pp) === 0
     })
     if (pkgs.length > 1) return cb(null, pkgs)
-    registry.get(pkgs[0], function (er, d) {
+    var uri = url.resolve(npm.config.get("registry"), pkgs[0])
+    registry.get(uri, null, function (er, d) {
       if (er) return cb(er)
       var vers = Object.keys(d.versions)
       if (!vers.length) return cb(null, pkgs)
@@ -39,7 +40,6 @@ unpublish.completion = function (opts, cb) {
 }
 
 function unpublish (args, cb) {
-
   if (args.length > 1) return cb(unpublish.usage)
 
   var thing = args.length ? args.shift().split("@") : []
@@ -57,6 +57,7 @@ function unpublish (args, cb) {
     // read the package name and version out of that.
     var cwdJson = path.join(process.cwd(), "package.json")
     return readJson(cwdJson, function (er, data) {
+      if (er && er.code !== "ENOENT" && er.code !== "ENOTDIR") return cb(er)
       if (er) return cb("Usage:\n"+unpublish.usage)
       gotProject(data.name, data.version, cb)
     })
@@ -67,12 +68,18 @@ function unpublish (args, cb) {
 function gotProject (project, version, cb_) {
   function cb (er) {
     if (er) return cb_(er)
-    output.write("- " + project + (version ? "@" + version : ""), cb_)
+    console.log("- " + project + (version ? "@" + version : ""))
+    cb_()
   }
 
   // remove from the cache first
   npm.commands.cache(["clean", project, version], function (er) {
-    if (er) return log.er(cb, "Failed to clean cache")(er)
-    registry.unpublish(project, version, cb)
+    if (er) {
+      log.error("unpublish", "Failed to clean cache")
+      return cb(er)
+    }
+
+    var uri = url.resolve(npm.config.get("registry"), project)
+    registry.unpublish(uri, version, cb)
   })
 }

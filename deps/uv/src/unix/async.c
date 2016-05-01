@@ -18,43 +18,239 @@
  * IN THE SOFTWARE.
  */
 
+/* This file contains both the uv__async internal infrastructure and the
+ * user-facing uv_async_t functions.
+ */
+
 #include "uv.h"
 #include "internal.h"
+#include "atomic-ops.h"
+
+#include <errno.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static void uv__async_event(uv_loop_t* loop,
+                            struct uv__async* w,
+                            unsigned int nevents);
+static int uv__async_eventfd(void);
 
 
-static void uv__async(EV_P_ ev_async* w, int revents) {
-  uv_async_t* async = container_of(w, uv_async_t, async_watcher);
+int uv_async_init(uv_loop_t* loop, uv_async_t* handle, uv_async_cb async_cb) {
+  if (uv__async_start(loop, &loop->async_watcher, uv__async_event))
+    return uv__set_sys_error(loop, errno);
 
-  if (async->async_cb) {
-    async->async_cb(async, 0);
-  }
-}
+  uv__handle_init(loop, (uv_handle_t*)handle, UV_ASYNC);
+  handle->async_cb = async_cb;
+  handle->pending = 0;
 
-
-int uv_async_init(uv_loop_t* loop, uv_async_t* async, uv_async_cb async_cb) {
-  uv__handle_init(loop, (uv_handle_t*)async, UV_ASYNC);
-  loop->counters.async_init++;
-
-  ev_async_init(&async->async_watcher, uv__async);
-  async->async_cb = async_cb;
-
-  /* Note: This does not have symmetry with the other libev wrappers. */
-  ev_async_start(loop->ev, &async->async_watcher);
-  uv__handle_unref(async);
-  uv__handle_start(async);
+  ngx_queue_insert_tail(&loop->async_handles, &handle->queue);
+  uv__handle_start(handle);
 
   return 0;
 }
 
 
-int uv_async_send(uv_async_t* async) {
-  ev_async_send(async->loop->ev, &async->async_watcher);
+int uv_async_send(uv_async_t* handle) {
+  /* Do a cheap read first. */
+  if (ACCESS_ONCE(int, handle->pending) != 0)
+    return 0;
+
+  if (cmpxchgi(&handle->pending, 0, 1) == 0)
+    uv__async_send(&handle->loop->async_watcher);
+
   return 0;
 }
 
 
 void uv__async_close(uv_async_t* handle) {
-  ev_async_stop(handle->loop->ev, &handle->async_watcher);
-  uv__handle_ref(handle);
+  ngx_queue_remove(&handle->queue);
   uv__handle_stop(handle);
+}
+
+
+static void uv__async_event(uv_loop_t* loop,
+                            struct uv__async* w,
+                            unsigned int nevents) {
+  ngx_queue_t* q;
+  uv_async_t* h;
+
+  ngx_queue_foreach(q, &loop->async_handles) {
+    h = ngx_queue_data(q, uv_async_t, queue);
+
+    if (cmpxchgi(&h->pending, 1, 0) == 0)
+      continue;
+
+    h->async_cb(h, 0);
+  }
+}
+
+
+static void uv__async_io(uv_loop_t* loop, uv__io_t* w, unsigned int events) {
+  struct uv__async* wa;
+  char buf[1024];
+  unsigned n;
+  ssize_t r;
+
+  n = 0;
+  for (;;) {
+    r = read(w->fd, buf, sizeof(buf));
+
+    if (r > 0)
+      n += r;
+
+    if (r == sizeof(buf))
+      continue;
+
+    if (r != -1)
+      break;
+
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      break;
+
+    if (errno == EINTR)
+      continue;
+
+    abort();
+  }
+
+  wa = container_of(w, struct uv__async, io_watcher);
+
+#if defined(__linux__)
+  if (wa->wfd == -1) {
+    uint64_t val;
+    assert(n == sizeof(val));
+    memcpy(&val, buf, sizeof(val));  /* Avoid alignment issues. */
+    wa->cb(loop, wa, val);
+    return;
+  }
+#endif
+
+  wa->cb(loop, wa, n);
+}
+
+
+void uv__async_send(struct uv__async* wa) {
+  const void* buf;
+  ssize_t len;
+  int fd;
+  int r;
+
+  buf = "";
+  len = 1;
+  fd = wa->wfd;
+
+#if defined(__linux__)
+  if (fd == -1) {
+    static const uint64_t val = 1;
+    buf = &val;
+    len = sizeof(val);
+    fd = wa->io_watcher.fd;  /* eventfd */
+  }
+#endif
+
+  do
+    r = write(fd, buf, len);
+  while (r == -1 && errno == EINTR);
+
+  if (r == len)
+    return;
+
+  if (r == -1)
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return;
+
+  abort();
+}
+
+
+void uv__async_init(struct uv__async* wa) {
+  wa->io_watcher.fd = -1;
+  wa->wfd = -1;
+}
+
+
+int uv__async_start(uv_loop_t* loop, struct uv__async* wa, uv__async_cb cb) {
+  int pipefd[2];
+  int fd;
+
+  if (wa->io_watcher.fd != -1)
+    return 0;
+
+  fd = uv__async_eventfd();
+  if (fd >= 0) {
+    pipefd[0] = fd;
+    pipefd[1] = -1;
+  }
+  else if (fd != -ENOSYS)
+    return -1;
+  else if (uv__make_pipe(pipefd, UV__F_NONBLOCK))
+    return -1;
+
+  uv__io_init(&wa->io_watcher, uv__async_io, pipefd[0]);
+  uv__io_start(loop, &wa->io_watcher, UV__POLLIN);
+  wa->wfd = pipefd[1];
+  wa->cb = cb;
+
+  return 0;
+}
+
+
+void uv__async_stop(uv_loop_t* loop, struct uv__async* wa) {
+  if (wa->io_watcher.fd == -1)
+    return;
+
+  uv__io_stop(loop, &wa->io_watcher, UV__POLLIN);
+  close(wa->io_watcher.fd);
+  wa->io_watcher.fd = -1;
+
+  if (wa->wfd != -1) {
+    close(wa->wfd);
+    wa->wfd = -1;
+  }
+}
+
+
+static int uv__async_eventfd() {
+#if defined(__linux__)
+  static int no_eventfd2;
+  static int no_eventfd;
+  int fd;
+
+  if (no_eventfd2)
+    goto skip_eventfd2;
+
+  fd = uv__eventfd2(0, UV__EFD_CLOEXEC | UV__EFD_NONBLOCK);
+  if (fd != -1)
+    return fd;
+
+  if (errno != ENOSYS)
+    return -errno;
+
+  no_eventfd2 = 1;
+
+skip_eventfd2:
+
+  if (no_eventfd)
+    goto skip_eventfd;
+
+  fd = uv__eventfd(0);
+  if (fd != -1) {
+    uv__cloexec(fd, 1);
+    uv__nonblock(fd, 1);
+    return fd;
+  }
+
+  if (errno != ENOSYS)
+    return -errno;
+
+  no_eventfd = 1;
+
+skip_eventfd:
+
+#endif
+
+  return -ENOSYS;
 }

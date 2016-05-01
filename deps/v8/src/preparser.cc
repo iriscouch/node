@@ -44,8 +44,8 @@
 
 namespace v8 {
 
-#ifdef _MSC_VER
-// Usually defined in math.h, but not in MSVC.
+#if defined(_MSC_VER) && (_MSC_VER < 1800)
+// Usually defined in math.h, but not in MSVC until VS2013+.
 // Abstracted to work
 int isfinite(double value);
 #endif
@@ -581,9 +581,8 @@ PreParser::Statement PreParser::ParseWithStatement(bool* ok) {
   ParseExpression(true, CHECK_OK);
   Expect(i::Token::RPAREN, CHECK_OK);
 
-  scope_->EnterWith();
+  Scope::InsideWith iw(scope_);
   ParseStatement(CHECK_OK);
-  scope_->LeaveWith();
   return Statement::Default();
 }
 
@@ -603,14 +602,17 @@ PreParser::Statement PreParser::ParseSwitchStatement(bool* ok) {
     if (token == i::Token::CASE) {
       Expect(i::Token::CASE, CHECK_OK);
       ParseExpression(true, CHECK_OK);
-      Expect(i::Token::COLON, CHECK_OK);
-    } else if (token == i::Token::DEFAULT) {
-      Expect(i::Token::DEFAULT, CHECK_OK);
-      Expect(i::Token::COLON, CHECK_OK);
     } else {
-      ParseStatement(CHECK_OK);
+      Expect(i::Token::DEFAULT, CHECK_OK);
     }
+    Expect(i::Token::COLON, CHECK_OK);
     token = peek();
+    while (token != i::Token::CASE &&
+           token != i::Token::DEFAULT &&
+           token != i::Token::RBRACE) {
+      ParseStatement(CHECK_OK);
+      token = peek();
+    }
   }
   Expect(i::Token::RBRACE, ok);
   return Statement::Default();
@@ -749,10 +751,9 @@ PreParser::Statement PreParser::ParseTryStatement(bool* ok) {
       return Statement::Default();
     }
     Expect(i::Token::RPAREN, CHECK_OK);
-    scope_->EnterWith();
-    ParseBlock(ok);
-    scope_->LeaveWith();
-    if (!*ok) Statement::Default();
+    { Scope::InsideWith iw(scope_);
+      ParseBlock(CHECK_OK);
+    }
     catch_or_finally_seen = true;
   }
   if (peek() == i::Token::FINALLY) {
